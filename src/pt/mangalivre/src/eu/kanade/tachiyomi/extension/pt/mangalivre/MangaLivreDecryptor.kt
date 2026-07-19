@@ -15,12 +15,6 @@ import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
 
-/**
- * Decrypts the {"<dataKey>": "<ciphertext>"} bodies the API returns (Rabbit cipher, CryptoJS
- * "Salted__" framing). Passphrase is ENC_KEY + MD5(dateUTC + HOST + ANTIBOT)[0..8]; the date
- * rotates daily and the three constants rotate in the site's bundle, so they're re-extracted from
- * the live bundle at runtime ([reloadConstants]) with the hardcoded values as fallback.
- */
 class MangaLivreDecryptor(
     private val baseUrl: String,
     private val client: OkHttpClient,
@@ -64,8 +58,12 @@ class MangaLivreDecryptor(
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
                 val match = EV_CONSTANTS_REGEX.find(js)
                 lastReloadMatched = match != null
-                // Order matters: host, antibot, encKey.
-                match?.let { constants = Constants(it.groupValues[1], it.groupValues[2], it.groupValues[3]) }
+                if (match != null) {
+                    // Grupos 1,2,3 = hostPart, antibotPart, encKey
+                    constants = Constants(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+                } else {
+                    lastReloadError = "no match in index.js"
+                }
             } else {
                 lastReloadMatched = false
                 lastReloadError = "no script[src*=index] found on baseUrl page"
@@ -116,17 +114,17 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        // Fallback only (current at build time); [reloadConstants] refreshes from the live bundle.
-        private const val DEFAULT_HOSTNAME_PART = "toonlivre.net::v8"
-        private const val DEFAULT_ANTIBOT_PART = "t81_4v21_b1"
-        private const val DEFAULT_ENC_KEY = "Sprang-Unkind-Unframed0"
+        // Fallback atualizado (02/07/2026) – extraído da nova função nv()
+        private const val DEFAULT_HOSTNAME_PART = "toonlivre.tv::v8"
+        private const val DEFAULT_ANTIBOT_PART = "t17_4v19_b2"
+        private const val DEFAULT_ENC_KEY = "Dealer-Critter-Catnip4"
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Matches the bundle's ev() password builder; minified var names vary, so match them as \w+
-        // and capture the three literals in declaration order (host, antibot, encKey).
+        // Regex adaptada para a função nv() que usa getUTCFullYear() e .split("")
+        // Captura três strings consecutivas com .split("") após a data UTC
         private val EV_CONSTANTS_REGEX = Regex(
-            """toISOString\(\)\.split\("T"\)\[0]\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)"""",
+            """\.getUTCFullYear\(\)[^;]*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)"""
         )
     }
 }
