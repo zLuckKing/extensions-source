@@ -56,7 +56,7 @@ class ReadingGateInterceptor(
             primeCookie(request)
             return proceedDecrypted(chain, request, primed = true, reloaded = reloaded)
         }
- 
+
         val dataKey = response.headers["x-toon-datakey"] ?: return response
 
         val contentType = response.body.contentType()
