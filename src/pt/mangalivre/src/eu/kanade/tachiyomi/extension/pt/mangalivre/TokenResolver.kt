@@ -12,15 +12,10 @@ import keiyoushi.utils.applicationContext
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-/**
- * Loads a real page in a hidden WebView so the site's own JS can clear Cloudflare's edge
- * challenge and generate the toon_v verification cookie — both land in the shared
- * CookieManager/cookie jar the extension's OkHttp client reads from afterwards.
- */
 object TokenResolver {
 
-    private const val TIMEOUT_SECONDS = 25L
-    private const val SETTLE_MS = 2_000L
+    private const val PAGE_TIMEOUT_SECONDS = 25L
+    private const val COOKIE_TIMEOUT_SECONDS = 10L
     private const val WEBVIEW_WIDTH = 1080
     private const val WEBVIEW_HEIGHT = 1920
 
@@ -67,12 +62,32 @@ object TokenResolver {
             }
         }
 
-        pageFinishedLatch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        Thread.sleep(SETTLE_MS)
+        // Espera a página terminar de carregar
+        pageFinishedLatch.await(PAGE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
 
+        // Aguarda ativamente o cookie "toon_v" aparecer
+        waitForCookie(pageUrl)
+
+        // Limpa o WebView
         handler.post {
             webView?.stopLoading()
             webView?.destroy()
         }
+    }
+
+    private fun waitForCookie(pageUrl: String) {
+        val baseUrl = pageUrl.substringBefore("?").substringBefore("#")
+        val deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(COOKIE_TIMEOUT_SECONDS)
+        val cookieManager = CookieManager.getInstance()
+
+        while (System.currentTimeMillis() < deadline) {
+            val cookies = cookieManager.getCookie(baseUrl) ?: ""
+            if (cookies.contains("toon_v=", ignoreCase = true)) {
+                return // cookie encontrado
+            }
+            Thread.sleep(500)
+        }
+        // Se chegou aqui, timeout sem cookie – não lançamos exceção para não quebrar o fluxo,
+        // mas o interceptor vai reportar a ausência.
     }
 }
