@@ -25,6 +25,7 @@ class ReadingGateInterceptor(
     // Tokens cacheados (inicia com valores padrão)
     @Volatile
     private var authToken: String = DEFAULT_AUTH_TOKEN
+
     @Volatile
     private var decoyToken: String = DEFAULT_DECOY_TOKEN
 
@@ -114,9 +115,7 @@ class ReadingGateInterceptor(
             .build()
     }
 
-    private fun buildToonSignature(path: String): String {
-        return if (path.contains("/chapters")) authToken else decoyToken
-    }
+    private fun buildToonSignature(path: String): String = if (path.contains("/chapters")) authToken else decoyToken
 
     /**
      * Tenta baixar o index.js e extrair novos tokens de assinatura.
@@ -148,14 +147,12 @@ class ReadingGateInterceptor(
         }
     }
 
-    private fun parseAsciiArray(arrayLiteral: String): String? {
-        return try {
-            arrayLiteral.split(",")
-                .map { it.trim().toInt().toChar() }
-                .joinToString("")
-        } catch (e: Exception) {
-            null
-        }
+    private fun parseAsciiArray(arrayLiteral: String): String? = try {
+        arrayLiteral.split(",")
+            .map { it.trim().toInt().toChar() }
+            .joinToString("")
+    } catch (e: Exception) {
+        null
     }
 
     data class ReaderPath(val path: String)
@@ -171,7 +168,7 @@ class ReadingGateInterceptor(
 
         // Captura dois arrays ASCII: [116,56,118,...] ... [116,56,118,...]
         private val TOKEN_REGEX = Regex(
-            """\[(\d{2,3}(?:,\s*\d{2,3}){5,})\] .*? \[(\d{2,3}(?:,\s*\d{2,3}){5,})\]"""
+            """\[(\d{2,3}(?:,\s*\d{2,3}){5,})\] .*? \[(\d{2,3}(?:,\s*\d{2,3}){5,})\]""",
         )
     }
 }
