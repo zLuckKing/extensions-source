@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import android.util.Base64
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -7,6 +8,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
+import java.security.MessageDigest
 
 /**
  * Clears the site's reading gate for same-host requests. The gate is a double-submit check: the
@@ -84,19 +86,30 @@ class ReadingGateInterceptor(
 
     private fun Request.withVerifyHeader(): Request {
         val verify = cookieClient.getCookie(baseUrl, "toon_v") ?: return this
-        val pass = if (url.encodedPath.contains("/chapters")) PASS_CHAPTERS else PASS_DEFAULT
         return newBuilder()
             .header("x-toon-verify", verify)
-            .header("x-toon-signature", pass)
+            .header("x-toon-signature", buildToonSignature(url.encodedPath))
             .build()
+    }
+
+    private fun buildToonSignature(path: String): String {
+        val bucket = System.currentTimeMillis() / 30_000L
+        val resource = if (path.contains("/chapters")) "chapters" else "other"
+        val toHash = "$bucket:$resource:$SIGNATURE_SALT"
+        val hash = MessageDigest.getInstance("SHA-256")
+            .digest(toHash.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return Base64.encodeToString("$bucket:$hash".toByteArray(), Base64.NO_WRAP)
     }
 
     data class ReaderPath(val path: String)
 
     companion object {
         private const val REFRESH_COOLDOWN_MS = 60_000L
-        private const val PASS_CHAPTERS = "t8v_authX9"
-        private const val PASS_DEFAULT = "t8v_decoy9"
+
+        // btoa(Math.PI.toString().substring(0, 5)) + "_1388" from the bundle's signer — constant
+        // since Math.PI never changes, so it's fine to precompute instead of recomputing per call.
+        private const val SIGNATURE_SALT = "My4xNDE=_1388"
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
     }
