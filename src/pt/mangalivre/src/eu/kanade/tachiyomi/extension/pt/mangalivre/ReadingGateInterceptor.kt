@@ -88,7 +88,7 @@ class ReadingGateInterceptor(
             if (!saved) {
                 throw IOException(
                     "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado. " +
-                    "Verifique se o WebView foi carregado corretamente."
+                        "Verifique se o WebView foi carregado corretamente.",
                 )
             }
         }
@@ -117,7 +117,7 @@ class ReadingGateInterceptor(
 
         cookieClient.cookieJar.saveFromResponse(
             baseUrl.toHttpUrl(),
-            listOf(okHttpCookie)
+            listOf(okHttpCookie),
         )
         return true
     }
@@ -155,5 +155,4 @@ class ReadingGateInterceptor(
 
 private fun OkHttpClient.getCookies(baseUrl: String) = cookieJar.loadForRequest(baseUrl.toHttpUrl())
 
-private fun OkHttpClient.getCookie(baseUrl: String, cookie: String): String? =
-    getCookies(baseUrl).firstOrNull { it.name == cookie }?.value?.takeUnless { it.isEmpty() }
+private fun OkHttpClient.getCookie(baseUrl: String, cookie: String): String? = getCookies(baseUrl).firstOrNull { it.name == cookie }?.value?.takeUnless { it.isEmpty() }
