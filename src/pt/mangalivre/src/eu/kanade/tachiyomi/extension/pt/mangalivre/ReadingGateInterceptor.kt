@@ -72,10 +72,11 @@ class ReadingGateInterceptor(
         synchronized(this) {
             if (System.currentTimeMillis() - lastPrimeAttemptAt < REFRESH_COOLDOWN_MS) return
             lastPrimeAttemptAt = System.currentTimeMillis()
-            val primePath = request.tag(ReaderPath::class.java)?.path ?: "/"
-            runCatching { TokenResolver.prime("$baseUrl$primePath", userAgent) }
 
-            // Apenas registra se o cookie foi gerado (não transfere mais)
+            // Usa a raiz do site para resolver o desafio (onde o Cloudflare costuma estar)
+            runCatching { TokenResolver.prime(baseUrl, userAgent) }
+
+            // Verifica se o cookie apareceu
             if (getToonVCookie() == null) {
                 throw IOException(
                     "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado no CookieManager.",
@@ -84,10 +85,6 @@ class ReadingGateInterceptor(
         }
     }
 
-    /**
-     * Obtém o cookie `toon_v` diretamente do CookieManager do WebView,
-     * que é onde o TokenResolver o armazena.
-     */
     private fun getToonVCookie(): String? {
         val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: return null
         return cookies.split(";")
@@ -123,5 +120,3 @@ class ReadingGateInterceptor(
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
     }
 }
-
-// Removidas as funções getCookies e getCookie – não são mais necessárias.
