@@ -51,8 +51,6 @@ abstract class MangaLivre :
         .add("Sec-Fetch-Mode", "cors")
         .add("Sec-Fetch-Site", "same-origin")
 
-    // ============================== Popular =======================================
-
     private val popularFilter = FilterList(
         listOf(
             OrderByFilter(options = listOf("" to SORT_POPULAR)),
@@ -64,8 +62,6 @@ abstract class MangaLivre :
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
 
-    // ============================== Latest =======================================
-
     private val latestFilter = FilterList(
         listOf(
             OrderByFilter(options = listOf("" to SORT_UPDATED)),
@@ -76,8 +72,6 @@ abstract class MangaLivre :
     override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", latestFilter)
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
-
-    // ============================== Search =======================================
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$apiUrl/mangas/search".toHttpUrl().newBuilder()
@@ -108,21 +102,15 @@ abstract class MangaLivre :
         return MangasPage(mangas, dto.hasNextPage)
     }
 
-    // ============================== Details =======================================
-
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/${manga.url}"
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiUrl/manga-by-slug/${manga.url}", headers)
 
     override fun mangaDetailsParse(response: Response): SManga = response.parseJson<MangaDto>().toSManga(useAlternativeTitle)
 
-    // ============================== Chapters =======================================
-
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> = response.parseJson<MangaDto>().toSChapterList()
-
-    // ============================== Pages =======================================
 
     override fun pageListRequest(chapter: SChapter): Request {
         val readerPath = chapter.url.substringBeforeLast("#")
@@ -136,8 +124,6 @@ abstract class MangaLivre :
     override fun pageListParse(response: Response): List<Page> = response.parseJson<PageDto>().toPageList()
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    // ============================== Filters =======================================
 
     override fun getFilterList(): FilterList = FilterList(
         listOf(
@@ -176,8 +162,6 @@ abstract class MangaLivre :
             setDefaultValue(false)
         }.also(screen::addPreference)
     }
-
-    // ============================== Utilities =======================================
 
     private inline fun <reified T> Response.parseJson(): T {
         val peek = peekBody(MAX_PEEK).string().trimStart()

@@ -24,7 +24,6 @@ class ReadingGateInterceptor(
     @Volatile
     private var lastPrimeAttemptAt = 0L
 
-    // Tokens cacheados (inicia com valores padrão)
     @Volatile
     private var authToken: String = DEFAULT_AUTH_TOKEN
 
@@ -52,7 +51,6 @@ class ReadingGateInterceptor(
         val response = chain.proceed(request.withVerifyHeader())
 
         if (response.code == 403) {
-            // Se temos o cookie mas o token foi rejeitado, tenta recarregar tokens
             if (primed && !tokenReloaded) {
                 response.close()
                 reloadSignatureTokens()
@@ -119,9 +117,6 @@ class ReadingGateInterceptor(
 
     private fun buildToonSignature(path: String): String = if (path.contains("/chapters")) authToken else decoyToken
 
-    /**
-     * Tenta baixar o index.js e extrair novos tokens de assinatura.
-     */
     private fun reloadSignatureTokens() {
         synchronized(this) {
             val now = System.currentTimeMillis()
@@ -168,7 +163,6 @@ class ReadingGateInterceptor(
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
 
-        // Captura dois arrays ASCII: [116,56,118,...] ... [116,56,118,...]
         private val TOKEN_REGEX = Regex(
             """\[(\d{2,3}(?:,\s*\d{2,3}){5,})\] .*? \[(\d{2,3}(?:,\s*\d{2,3}){5,})\]""",
         )
