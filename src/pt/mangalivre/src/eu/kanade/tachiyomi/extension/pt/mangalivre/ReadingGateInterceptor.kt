@@ -44,11 +44,18 @@ class ReadingGateInterceptor(
         val response = chain.proceed(request.withVerifyHeader())
 
         if (response.code == 403) {
-            if (primed) return response
-            response.close()
-            primeCookie(request)
-            return proceedDecrypted(chain, request, primed = true, reloaded = reloaded)
-        }
+    if (primed) {
+        response.close()
+        val cookieNow = cookieClient.getCookie(baseUrl, "toon_v")
+        throw IOException(
+            "DEBUG 403 pós-prime | toon_v presente=${cookieNow != null} | " +
+                "toon_v valor=${cookieNow?.take(12)}... | url=${request.url}",
+        )
+    }
+    response.close()
+    primeCookie(request)
+    return proceedDecrypted(chain, request, primed = true, reloaded = reloaded)
+}
 
         val dataKey = response.headers["x-toon-datakey"] ?: return response
 
