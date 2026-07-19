@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import android.util.Base64
-import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -11,13 +10,6 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 import java.security.MessageDigest
 
-/**
- * Clears the site's reading gate for same-host requests. The gate is a double-submit check: the
- * client-generated `toon_v` cookie must be echoed in the `x-toon-verify` header. On a 403 this
- * primes the cookie via a hidden WebView ([TokenResolver]); on a decrypt failure it reloads the
- * rotated constants ([decryptor]). The two retries are independent, so a request that is both gated
- * and stale-keyed still recovers.
- */
 class ReadingGateInterceptor(
     private val baseUrl: String,
     private val userAgent: String?,
@@ -49,7 +41,7 @@ class ReadingGateInterceptor(
         if (response.code == 403) {
             if (primed) {
                 response.close()
-                val cookieNow = cookieClient.getCookie(baseUrl, "toon_v")
+                val cookieNow = getToonVCookie()
                 throw IOException(
                     "DEBUG 403 pós-prime | toon_v presente=${cookieNow != null} | " +
                         "toon_v valor=${cookieNow?.take(12)}... | url=${request.url}",
@@ -83,47 +75,29 @@ class ReadingGateInterceptor(
             val primePath = request.tag(ReaderPath::class.java)?.path ?: "/"
             runCatching { TokenResolver.prime("$baseUrl$primePath", userAgent) }
 
-            // Transfere o cookie do WebView para o cookieClient
-            val saved = extractAndSaveToonCookie()
-            if (!saved) {
+            // Apenas registra se o cookie foi gerado (não transfere mais)
+            if (getToonVCookie() == null) {
                 throw IOException(
-                    "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado. " +
-                        "Verifique se o WebView foi carregado corretamente.",
+                    "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado no CookieManager.",
                 )
             }
         }
     }
 
     /**
-     * Lê o cookie `toon_v` do CookieManager do WebView e o persiste no [cookieClient].
-     * Retorna `true` se o cookie foi encontrado e salvo com sucesso.
+     * Obtém o cookie `toon_v` diretamente do CookieManager do WebView,
+     * que é onde o TokenResolver o armazena.
      */
-    private fun extractAndSaveToonCookie(): Boolean {
-        val cookieManager = android.webkit.CookieManager.getInstance()
-        val cookies = cookieManager.getCookie(baseUrl) ?: return false
-        val toonV = cookies.split(";")
+    private fun getToonVCookie(): String? {
+        val cookies = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: return null
+        return cookies.split(";")
             .firstOrNull { it.trim().startsWith("toon_v=", ignoreCase = true) }
             ?.substringAfter("=")
             ?.trim()
-            ?: return false
-
-        val domain = baseUrl.toHttpUrl().host
-        val okHttpCookie = Cookie.Builder()
-            .name("toon_v")
-            .value(toonV)
-            .domain(domain)
-            .path("/")
-            .build()
-
-        cookieClient.cookieJar.saveFromResponse(
-            baseUrl.toHttpUrl(),
-            listOf(okHttpCookie),
-        )
-        return true
     }
 
     private fun Request.withVerifyHeader(): Request {
-        val verify = cookieClient.getCookie(baseUrl, "toon_v") ?: return this
+        val verify = getToonVCookie() ?: return this
         return newBuilder()
             .header("x-toon-verify", verify)
             .header("x-toon-signature", buildToonSignature(url.encodedPath))
@@ -144,15 +118,10 @@ class ReadingGateInterceptor(
 
     companion object {
         private const val REFRESH_COOLDOWN_MS = 60_000L
-
-        // btoa(Math.PI.toString().substring(0, 5)) + "_1388" from the bundle's signer — constant
-        // since Math.PI never changes, so it's fine to precompute instead of recomputing per call.
         private const val SIGNATURE_SALT = "My4xNDE=_1388"
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
     }
 }
 
-private fun OkHttpClient.getCookies(baseUrl: String) = cookieJar.loadForRequest(baseUrl.toHttpUrl())
-
-private fun OkHttpClient.getCookie(baseUrl: String, cookie: String): String? = getCookies(baseUrl).firstOrNull { it.name == cookie }?.value?.takeUnless { it.isEmpty() }
+// Removidas as funções getCookies e getCookie – não são mais necessárias.
