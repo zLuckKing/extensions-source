@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import android.util.Base64
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -8,7 +7,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
-import java.security.MessageDigest
 
 class ReadingGateInterceptor(
     private val baseUrl: String,
@@ -72,11 +70,7 @@ class ReadingGateInterceptor(
         synchronized(this) {
             if (System.currentTimeMillis() - lastPrimeAttemptAt < REFRESH_COOLDOWN_MS) return
             lastPrimeAttemptAt = System.currentTimeMillis()
-
-            // Usa a raiz do site para resolver o desafio (onde o Cloudflare costuma estar)
             runCatching { TokenResolver.prime(baseUrl, userAgent) }
-
-            // Verifica se o cookie apareceu
             if (getToonVCookie() == null) {
                 throw IOException(
                     "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado no CookieManager.",
@@ -101,21 +95,19 @@ class ReadingGateInterceptor(
             .build()
     }
 
+    // ---------- ALTERAÇÃO ÚNICA ----------
     private fun buildToonSignature(path: String): String {
-        val bucket = System.currentTimeMillis() / 30_000L
-        val resource = if (path.contains("/chapters")) "chapters" else "other"
-        val toHash = "$bucket:$resource:$SIGNATURE_SALT"
-        val hash = MessageDigest.getInstance("SHA-256")
-            .digest(toHash.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return Base64.encodeToString("$bucket:$hash".toByteArray(), Base64.NO_WRAP)
+        // A partir de 07/2026 o site passou a usar tokens fixos:
+        //   chapters → "t8v_authX9"
+        //   outros   → "t8v_decoy9"
+        return if (path.contains("/chapters")) "t8v_authX9" else "t8v_decoy9"
     }
+    // ---------------------------------------
 
     data class ReaderPath(val path: String)
 
     companion object {
         private const val REFRESH_COOLDOWN_MS = 60_000L
-        private const val SIGNATURE_SALT = "My4xNDE=_1388"
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
     }
