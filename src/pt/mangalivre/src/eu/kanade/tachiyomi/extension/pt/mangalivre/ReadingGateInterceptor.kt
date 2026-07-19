@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import android.util.Base64
+import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -81,7 +82,44 @@ class ReadingGateInterceptor(
             lastPrimeAttemptAt = System.currentTimeMillis()
             val primePath = request.tag(ReaderPath::class.java)?.path ?: "/"
             runCatching { TokenResolver.prime("$baseUrl$primePath", userAgent) }
+
+            // Transfere o cookie do WebView para o cookieClient
+            val saved = extractAndSaveToonCookie()
+            if (!saved) {
+                throw IOException(
+                    "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado. " +
+                    "Verifique se o WebView foi carregado corretamente."
+                )
+            }
         }
+    }
+
+    /**
+     * Lê o cookie `toon_v` do CookieManager do WebView e o persiste no [cookieClient].
+     * Retorna `true` se o cookie foi encontrado e salvo com sucesso.
+     */
+    private fun extractAndSaveToonCookie(): Boolean {
+        val cookieManager = android.webkit.CookieManager.getInstance()
+        val cookies = cookieManager.getCookie(baseUrl) ?: return false
+        val toonV = cookies.split(";")
+            .firstOrNull { it.trim().startsWith("toon_v=", ignoreCase = true) }
+            ?.substringAfter("=")
+            ?.trim()
+            ?: return false
+
+        val domain = baseUrl.toHttpUrl().host
+        val okHttpCookie = Cookie.Builder()
+            .name("toon_v")
+            .value(toonV)
+            .domain(domain)
+            .path("/")
+            .build()
+
+        cookieClient.cookieJar.saveFromResponse(
+            baseUrl.toHttpUrl(),
+            listOf(okHttpCookie)
+        )
+        return true
     }
 
     private fun Request.withVerifyHeader(): Request {
@@ -117,4 +155,5 @@ class ReadingGateInterceptor(
 
 private fun OkHttpClient.getCookies(baseUrl: String) = cookieJar.loadForRequest(baseUrl.toHttpUrl())
 
-private fun OkHttpClient.getCookie(baseUrl: String, cookie: String): String? = getCookies(baseUrl).firstOrNull { it.name == cookie }?.value?.takeUnless { it.isEmpty() }
+private fun OkHttpClient.getCookie(baseUrl: String, cookie: String): String? =
+    getCookies(baseUrl).firstOrNull { it.name == cookie }?.value?.takeUnless { it.isEmpty() }
