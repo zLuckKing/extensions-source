@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -15,6 +16,7 @@ class ReadingGateInterceptor(
     private val userAgent: String?,
     private val cookieClient: OkHttpClient,
     private val decryptor: MangaLivreDecryptor,
+    private val headers: Headers,
 ) : Interceptor {
 
     private val baseUrlHost = baseUrl.toHttpUrl().host
