@@ -31,6 +31,10 @@ class MangaLivreDecryptor(
 
     @Volatile private var lastReloadAt = 0L
 
+    @Volatile private var lastReloadMatched: Boolean? = null
+
+    @Volatile private var lastReloadError: String? = null
+
     private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
 
     fun decrypt(cipherWrapperBody: String, dataKey: String): String? = runCatching {
@@ -38,6 +42,12 @@ class MangaLivreDecryptor(
             ?: return@runCatching null
         decryptRabbit(ciphertext, derivePassword()).takeIf { it.isValidJson() }
     }.getOrNull()
+
+    fun debugInfo(): String {
+        val c = constants
+        return "reloadMatched=$lastReloadMatched reloadError=$lastReloadError " +
+            "host=${c.hostPart} antibot=${c.antibotPart} encKeyLen=${c.encKey.length}"
+    }
 
     fun reloadConstants() {
         val now = System.currentTimeMillis()
@@ -52,12 +62,15 @@ class MangaLivreDecryptor(
                 ?.absUrl("src")
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
-                EV_CONSTANTS_REGEX.find(js)?.let { match ->
-                    // Order matters: host, antibot, encKey.
-                    constants = Constants(match.groupValues[1], match.groupValues[2], match.groupValues[3])
-                }
+                val match = EV_CONSTANTS_REGEX.find(js)
+                lastReloadMatched = match != null
+                // Order matters: host, antibot, encKey.
+                match?.let { constants = Constants(it.groupValues[1], it.groupValues[2], it.groupValues[3]) }
+            } else {
+                lastReloadMatched = false
+                lastReloadError = "no script[src*=index] found on baseUrl page"
             }
-        }
+        }.onFailure { lastReloadError = it.javaClass.simpleName + ": " + it.message }
     }
 
     private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
@@ -113,7 +126,7 @@ class MangaLivreDecryptor(
         // Matches the bundle's ev() password builder; minified var names vary, so match them as \w+
         // and capture the three literals in declaration order (host, antibot, encKey).
         private val EV_CONSTANTS_REGEX = Regex(
-            """toISOString\(\)\.split\("T"\)\[0]\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)""",
+            """toISOString\(\)\.split\("T"\)\[0]\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)"\s*,\s*\w+\s*=\s*"([^"]+)"""",
         )
     }
 }
