@@ -87,7 +87,7 @@ class ReadingGateInterceptor(
         val pass = if (url.encodedPath.contains("/chapters")) PASS_CHAPTERS else PASS_DEFAULT
         return newBuilder()
             .header("x-toon-verify", verify)
-            .header("toonlivre-pass", pass)
+            .header("x-toon-signature", pass)
             .build()
     }
 
@@ -95,8 +95,8 @@ class ReadingGateInterceptor(
 
     companion object {
         private const val REFRESH_COOLDOWN_MS = 60_000L
-        private const val PASS_CHAPTERS = "auth2028xy"
-        private const val PASS_DEFAULT = "decoy99xz"
+        private const val PASS_CHAPTERS = "t8v_authX9"
+        private const val PASS_DEFAULT = "t8v_decoy9"
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
     }
