@@ -68,7 +68,7 @@ class ReadingGateInterceptor(
         }
 
         response.close()
-        if (reloaded) throw IOException(NON_JSON_MESSAGE)
+        if (reloaded) throw IOException("$NON_JSON_MESSAGE | ${decryptor.debugInfo()}")
         decryptor.reloadConstants()
         return proceedDecrypted(chain, request, primed = primed, reloaded = true)
     }
