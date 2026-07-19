@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.util.asJsoup
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -20,12 +22,21 @@ class ReadingGateInterceptor(
     @Volatile
     private var lastPrimeAttemptAt = 0L
 
+    // Tokens cacheados (inicia com valores padrão)
+    @Volatile
+    private var authToken: String = DEFAULT_AUTH_TOKEN
+    @Volatile
+    private var decoyToken: String = DEFAULT_DECOY_TOKEN
+
+    @Volatile
+    private var lastTokenReloadAt = 0L
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         if (request.url.host != baseUrlHost) {
             return chain.proceed(request)
         }
-        return proceedDecrypted(chain, request, primed = false, reloaded = false)
+        return proceedDecrypted(chain, request, primed = false, reloaded = false, tokenReloaded = false)
     }
 
     private fun proceedDecrypted(
@@ -33,10 +44,18 @@ class ReadingGateInterceptor(
         request: Request,
         primed: Boolean,
         reloaded: Boolean,
+        tokenReloaded: Boolean,
     ): Response {
         val response = chain.proceed(request.withVerifyHeader())
 
         if (response.code == 403) {
+            // Se temos o cookie mas o token foi rejeitado, tenta recarregar tokens
+            if (primed && !tokenReloaded) {
+                response.close()
+                reloadSignatureTokens()
+                return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenReloaded = true)
+            }
+
             if (primed) {
                 response.close()
                 val cookieNow = getToonVCookie()
@@ -47,7 +66,7 @@ class ReadingGateInterceptor(
             }
             response.close()
             primeCookie(request)
-            return proceedDecrypted(chain, request, primed = true, reloaded = reloaded)
+            return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenReloaded = tokenReloaded)
         }
 
         val dataKey = response.headers["x-toon-datakey"] ?: return response
@@ -63,7 +82,7 @@ class ReadingGateInterceptor(
         response.close()
         if (reloaded) throw IOException("$NON_JSON_MESSAGE | ${decryptor.debugInfo()}")
         decryptor.reloadConstants()
-        return proceedDecrypted(chain, request, primed = primed, reloaded = true)
+        return proceedDecrypted(chain, request, primed = primed, reloaded = true, tokenReloaded = tokenReloaded)
     }
 
     private fun primeCookie(request: Request) {
@@ -95,20 +114,64 @@ class ReadingGateInterceptor(
             .build()
     }
 
-    // ---------- ALTERAÇÃO ÚNICA ----------
     private fun buildToonSignature(path: String): String {
-        // A partir de 07/2026 o site passou a usar tokens fixos:
-        //   chapters → "t8v_authX9"
-        //   outros   → "t8v_decoy9"
-        return if (path.contains("/chapters")) "t8v_authX9" else "t8v_decoy9"
+        return if (path.contains("/chapters")) authToken else decoyToken
     }
-    // ---------------------------------------
+
+    /**
+     * Tenta baixar o index.js e extrair novos tokens de assinatura.
+     */
+    private fun reloadSignatureTokens() {
+        synchronized(this) {
+            val now = System.currentTimeMillis()
+            if (now - lastTokenReloadAt < TOKEN_RELOAD_COOLDOWN_MS) return
+            lastTokenReloadAt = now
+        }
+
+        runCatching {
+            val indexJsUrl = cookieClient.newCall(GET(baseUrl, headers)).execute()
+                .asJsoup()
+                .selectFirst("script[src*=index]")
+                ?.absUrl("src")
+            if (indexJsUrl != null) {
+                val js = cookieClient.newCall(GET(indexJsUrl, headers)).execute().body.string()
+                val match = TOKEN_REGEX.find(js)
+                if (match != null) {
+                    val authStr = parseAsciiArray(match.groupValues[1])
+                    val decoyStr = parseAsciiArray(match.groupValues[2])
+                    if (authStr != null && decoyStr != null) {
+                        authToken = authStr
+                        decoyToken = decoyStr
+                    }
+                }
+            }
+        }
+    }
+
+    private fun parseAsciiArray(arrayLiteral: String): String? {
+        return try {
+            arrayLiteral.split(",")
+                .map { it.trim().toInt().toChar() }
+                .joinToString("")
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     data class ReaderPath(val path: String)
 
     companion object {
+        private const val DEFAULT_AUTH_TOKEN = "t8v_authX9"
+        private const val DEFAULT_DECOY_TOKEN = "t8v_decoy9"
+
         private const val REFRESH_COOLDOWN_MS = 60_000L
+        private const val TOKEN_RELOAD_COOLDOWN_MS = 30_000L
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
+
+        // Captura dois arrays ASCII: [116,56,118,...] ... [116,56,118,...]
+        private val TOKEN_REGEX = Regex(
+            """\[(\d{2,3}(?:,\s*\d{2,3}){5,})\] .*? \[(\d{2,3}(?:,\s*\d{2,3}){5,})\]"""
+        )
     }
 }
