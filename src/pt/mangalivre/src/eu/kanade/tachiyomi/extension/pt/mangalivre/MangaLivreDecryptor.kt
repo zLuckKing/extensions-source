@@ -59,7 +59,6 @@ class MangaLivreDecryptor(
                 val match = EV_CONSTANTS_REGEX.find(js)
                 lastReloadMatched = match != null
                 if (match != null) {
-                    // Grupos 1,2,3 = hostPart, antibotPart, encKey
                     constants = Constants(match.groupValues[1], match.groupValues[2], match.groupValues[3])
                 } else {
                     lastReloadError = "no match in index.js"
@@ -124,7 +123,7 @@ class MangaLivreDecryptor(
         // Regex adaptada para a função nv() que usa getUTCFullYear() e .split("")
         // Captura três strings consecutivas com .split("") após a data UTC
         private val EV_CONSTANTS_REGEX = Regex(
-            """\.getUTCFullYear\(\)[^;]*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)"""
+            """\.getUTCFullYear\(\)[^;]*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)""",
         )
     }
 }
