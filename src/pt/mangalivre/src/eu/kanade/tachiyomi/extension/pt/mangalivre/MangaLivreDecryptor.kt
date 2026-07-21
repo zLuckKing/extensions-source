@@ -84,15 +84,18 @@ class MangaLivreDecryptor(
         return String(plaintext, Charsets.UTF_8)
     }
 
+    // ---------- CORREÇÃO PRINCIPAL ----------
     private fun derivePassword(date: String = LocalDate.now(ZoneOffset.UTC).toString()): String {
         val c = constants
         val toHash = "$date${c.hostPart}${c.antibotPart}"
-        val md5Part = MessageDigest.getInstance("MD5")
+        // SHA-256 substitui MD5 (conforme função sv() do bundle atual)
+        val sha256Part = MessageDigest.getInstance("SHA-256")
             .digest(toHash.toByteArray())
             .joinToString("") { "%02x".format(it) }
             .substring(0, 8)
-        return c.encKey + md5Part
+        return c.encKey + sha256Part
     }
+    // ----------------------------------------
 
     private fun evpBytesToKey(password: ByteArray, salt: ByteArray, keyLen: Int = 16, ivLen: Int = 8): Pair<ByteArray, ByteArray> {
         val derived = ByteArray(keyLen + ivLen)
@@ -113,17 +116,17 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        // Fallback atualizado (02/07/2026) – extraído da nova função nv()
-        private const val DEFAULT_HOSTNAME_PART = "toonlivre.tv::v8"
-        private const val DEFAULT_ANTIBOT_PART = "t17_4v19_b2"
-        private const val DEFAULT_ENC_KEY = "Dealer-Critter-Catnip4"
+        // Constantes de fallback atualizadas (21/07/2026)
+        private const val DEFAULT_HOSTNAME_PART = "toonlivre.com::v8"
+        private const val DEFAULT_ANTIBOT_PART = "t8_4v2_b"
+        private const val DEFAULT_ENC_KEY = "Magnesium-Strike-Astonish3"
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Regex adaptada para a função nv() que usa getUTCFullYear() e .split("")
-        // Captura três strings consecutivas com .split("") após a data UTC
+        // Regex robusta que captura as três atribuições consecutivas com .split("")
+        // após a chamada getUTCFullYear()
         private val EV_CONSTANTS_REGEX = Regex(
-            """\.getUTCFullYear\(\)[^;]*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)\s*,\s*[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)""",
+            """getUTCFullYear\(\).*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(.*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(.*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)""",
         )
     }
 }
