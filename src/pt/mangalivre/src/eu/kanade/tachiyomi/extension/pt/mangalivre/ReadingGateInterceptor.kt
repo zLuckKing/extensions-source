@@ -163,7 +163,8 @@ class ReadingGateInterceptor(
 
                     view.webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView, url: String) {
-                            view.evaluateJavascript("""
+                            view.evaluateJavascript(
+                                """
                                 (function() {
                                     const capture = (sig) => {
                                         window._capturedSignature = sig;
@@ -174,8 +175,8 @@ class ReadingGateInterceptor(
                                         const opts = args[1] || {};
                                         if (url.includes('/api/mangas/')) {
                                             if (opts.headers) {
-                                                const sig = opts.headers instanceof Headers ? 
-                                                    opts.headers.get('x-toon-signature') : 
+                                                const sig = opts.headers instanceof Headers ?
+                                                    opts.headers.get('x-toon-signature') :
                                                     opts.headers['x-toon-signature'];
                                                 if (sig) capture(sig);
                                             }
@@ -195,7 +196,9 @@ class ReadingGateInterceptor(
                                         return xhr;
                                     };
                                 })();
-                            """.trimIndent(), null)
+                                """.trimIndent(),
+                                null,
+                            )
                         }
                     }
 
