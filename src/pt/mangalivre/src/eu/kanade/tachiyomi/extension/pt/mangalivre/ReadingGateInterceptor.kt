@@ -154,7 +154,6 @@ class ReadingGateInterceptor(
                 if (cookieValue != null) {
                     add("Cookie", "toon_v=$cookieValue")
                 }
-                // Referer: URL da obra (ex.: https://toonlivre.net/manga/slug)
                 add("Referer", baseUrl + "/" + path.substringBefore("/", path.indexOf("/", 1)))
             }.build()
 
