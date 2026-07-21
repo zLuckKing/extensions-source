@@ -133,14 +133,12 @@ class ReadingGateInterceptor(
     }
 
     private fun refreshToken() {
-        // Tenta via meta tag da página do capítulo
         val path = lastReaderPath
         if (path != null) {
             val token = fetchTokenFromMeta(path)
             if (token != null) return
         }
 
-        // Fallback: API /api/seed
         Log.d("ReadingGate", "Meta tag falhou, tentando /api/seed...")
         val token = fetchTokenFromApi()
         if (token != null) return
@@ -156,6 +154,7 @@ class ReadingGateInterceptor(
                 if (cookieValue != null) {
                     add("Cookie", "toon_v=$cookieValue")
                 }
+                add("Referer", baseUrl + "/" + path.substringBefore("/", path.indexOf("/", 1)))
             }.build()
 
             val request = GET(pageUrl, pageHeaders)
@@ -163,7 +162,7 @@ class ReadingGateInterceptor(
             val html = response.body.string()
 
             val metaRegex = Regex(
-                """<meta[^>]+name=["']t-seed["'][^>]+content=["']([^"']+)["']""",
+                """<meta[^>]*?name=["']t-seed["'][^>]*?content=["']([^"']+)["']""",
                 RegexOption.IGNORE_CASE,
             )
             val match = metaRegex.find(html)
