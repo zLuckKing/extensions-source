@@ -5,8 +5,6 @@ import android.os.Looper
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import keiyoushi.utils.applicationContext
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -16,8 +14,6 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 class ReadingGateInterceptor(
     private val baseUrl: String,
@@ -144,91 +140,89 @@ class ReadingGateInterceptor(
         }
     }
 
-    private suspend fun fetchLiveTokenFromWebView(pageUrl: String): String? = withContext(Dispatchers.Main) {
-        suspendCoroutine { cont ->
-            val handler = Handler(Looper.getMainLooper())
-            val latch = CountDownLatch(1)
-            var webView: WebView? = null
-            var capturedToken: String? = null
+    private fun fetchLiveTokenFromWebView(pageUrl: String): String? {
+        val handler = Handler(Looper.getMainLooper())
+        val latch = CountDownLatch(1)
+        var capturedToken: String? = null
+        var webView: WebView? = null
 
-            handler.post {
-                try {
-                    val view = WebView(applicationContext)
-                    webView = view
-                    with(view.settings) {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        if (!userAgent.isNullOrBlank()) userAgentString = userAgent
-                    }
+        handler.post {
+            try {
+                val view = WebView(applicationContext)
+                webView = view
+                with(view.settings) {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    if (!userAgent.isNullOrBlank()) userAgentString = userAgent
+                }
 
-                    view.webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView, url: String) {
-                            view.evaluateJavascript(
-                                """
-                                (function() {
-                                    const capture = (sig) => {
-                                        window._capturedSignature = sig;
-                                    };
-                                    const origFetch = window.fetch;
-                                    window.fetch = function(...args) {
-                                        const url = args[0].toString();
-                                        const opts = args[1] || {};
-                                        if (url.includes('/api/mangas/')) {
-                                            if (opts.headers) {
-                                                const sig = opts.headers instanceof Headers ?
-                                                    opts.headers.get('x-toon-signature') :
-                                                    opts.headers['x-toon-signature'];
-                                                if (sig) capture(sig);
-                                            }
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String) {
+                        view.evaluateJavascript(
+                            """
+                            (function() {
+                                const capture = (sig) => {
+                                    window._capturedSignature = sig;
+                                };
+                                const origFetch = window.fetch;
+                                window.fetch = function(...args) {
+                                    const url = args[0].toString();
+                                    const opts = args[1] || {};
+                                    if (url.includes('/api/mangas/')) {
+                                        if (opts.headers) {
+                                            const sig = opts.headers instanceof Headers ?
+                                                opts.headers.get('x-toon-signature') :
+                                                opts.headers['x-toon-signature'];
+                                            if (sig) capture(sig);
                                         }
-                                        return origFetch.apply(this, args);
-                                    };
-                                    const origXHR = window.XMLHttpRequest;
-                                    window.XMLHttpRequest = function() {
-                                        const xhr = new origXHR();
-                                        const origSetHeader = xhr.setRequestHeader;
-                                        xhr.setRequestHeader = function(header, value) {
-                                            if (header.toLowerCase() === 'x-toon-signature') {
-                                                capture(value);
-                                            }
-                                            return origSetHeader.apply(this, arguments);
-                                        };
-                                        return xhr;
-                                    };
-                                })();
-                                """.trimIndent(),
-                                null,
-                            )
-                        }
-                    }
-
-                    view.loadUrl(pageUrl)
-
-                    Thread {
-                        var elapsed = 0
-                        while (elapsed < 15_000) {
-                            if (capturedToken != null) break
-                            Thread.sleep(500)
-                            handler.post {
-                                view.evaluateJavascript("window._capturedSignature") { result ->
-                                    if (result != null && result != "null" && result.isNotEmpty()) {
-                                        capturedToken = result.trim('"')
                                     }
+                                    return origFetch.apply(this, args);
+                                };
+                                const origXHR = window.XMLHttpRequest;
+                                window.XMLHttpRequest = function() {
+                                    const xhr = new origXHR();
+                                    const origSetHeader = xhr.setRequestHeader;
+                                    xhr.setRequestHeader = function(header, value) {
+                                        if (header.toLowerCase() === 'x-toon-signature') {
+                                            capture(value);
+                                        }
+                                        return origSetHeader.apply(this, arguments);
+                                    };
+                                    return xhr;
+                                };
+                            })();
+                            """.trimIndent(),
+                            null,
+                        )
+                    }
+                }
+
+                view.loadUrl(pageUrl)
+
+                Thread {
+                    var elapsed = 0
+                    while (elapsed < 15_000) {
+                        if (capturedToken != null) break
+                        Thread.sleep(500)
+                        handler.post {
+                            view.evaluateJavascript("window._capturedSignature") { result ->
+                                if (result != null && result != "null" && result.isNotEmpty()) {
+                                    capturedToken = result.trim('"')
                                 }
                             }
-                            elapsed += 500
                         }
-                        latch.countDown()
-                    }.start()
-                } catch (e: Exception) {
+                        elapsed += 500
+                    }
                     latch.countDown()
-                }
+                }.start()
+            } catch (e: Exception) {
+                latch.countDown()
             }
-
-            latch.await(20, TimeUnit.SECONDS)
-            handler.post { webView?.destroy() }
-            cont.resume(capturedToken)
         }
+
+        latch.await(20, TimeUnit.SECONDS)
+        handler.post { webView?.destroy() }
+        return capturedToken
     }
 
     data class ReaderPath(val path: String)
