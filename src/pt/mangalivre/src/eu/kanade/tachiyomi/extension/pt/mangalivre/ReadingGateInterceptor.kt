@@ -1,8 +1,10 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.util.asJsoup
-import okhttp3.Headers
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import keiyoushi.utils.applicationContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -10,13 +12,18 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class ReadingGateInterceptor(
     private val baseUrl: String,
     private val userAgent: String?,
     private val cookieClient: OkHttpClient,
     private val decryptor: MangaLivreDecryptor,
-    private val headers: Headers,
 ) : Interceptor {
 
     private val baseUrlHost = baseUrl.toHttpUrl().host
@@ -31,14 +38,14 @@ class ReadingGateInterceptor(
     private var decoyToken: String = DEFAULT_DECOY_TOKEN
 
     @Volatile
-    private var lastTokenReloadAt = 0L
+    private var lastTokenCaptureAt = 0L
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         if (request.url.host != baseUrlHost) {
             return chain.proceed(request)
         }
-        return proceedDecrypted(chain, request, primed = false, reloaded = false, tokenReloaded = false)
+        return proceedDecrypted(chain, request, primed = false, reloaded = false, tokenCaptured = false)
     }
 
     private fun proceedDecrypted(
@@ -46,15 +53,16 @@ class ReadingGateInterceptor(
         request: Request,
         primed: Boolean,
         reloaded: Boolean,
-        tokenReloaded: Boolean,
+        tokenCaptured: Boolean,
     ): Response {
         val response = chain.proceed(request.withVerifyHeader())
 
         if (response.code == 403) {
-            if (primed && !tokenReloaded) {
+            // Se temos o cookie mas o token foi rejeitado, tenta capturar via WebView
+            if (primed && !tokenCaptured) {
                 response.close()
-                reloadSignatureTokens()
-                return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenReloaded = true)
+                captureTokenFromChapter(request.url.encodedPath)
+                return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenCaptured = true)
             }
 
             if (primed) {
@@ -67,7 +75,7 @@ class ReadingGateInterceptor(
             }
             response.close()
             primeCookie(request)
-            return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenReloaded = tokenReloaded)
+            return proceedDecrypted(chain, request, primed = true, reloaded = reloaded, tokenCaptured = tokenCaptured)
         }
 
         val dataKey = response.headers["x-toon-datakey"] ?: return response
@@ -83,14 +91,14 @@ class ReadingGateInterceptor(
         response.close()
         if (reloaded) throw IOException("$NON_JSON_MESSAGE | ${decryptor.debugInfo()}")
         decryptor.reloadConstants()
-        return proceedDecrypted(chain, request, primed = primed, reloaded = true, tokenReloaded = tokenReloaded)
+        return proceedDecrypted(chain, request, primed = primed, reloaded = true, tokenCaptured = tokenCaptured)
     }
 
     private fun primeCookie(request: Request) {
         synchronized(this) {
             if (System.currentTimeMillis() - lastPrimeAttemptAt < REFRESH_COOLDOWN_MS) return
             lastPrimeAttemptAt = System.currentTimeMillis()
-            runCatching { TokenResolver.prime(baseUrl, userAgent) }
+            TokenResolver.prime(baseUrl, userAgent)
             if (getToonVCookie() == null) {
                 throw IOException(
                     "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado no CookieManager.",
@@ -115,31 +123,124 @@ class ReadingGateInterceptor(
             .build()
     }
 
-    private fun buildToonSignature(path: String): String = if (path.contains("/chapters")) authToken else decoyToken
+    private fun buildToonSignature(path: String): String {
+        return if (path.contains("/chapters")) authToken else decoyToken
+    }
 
-    private fun reloadSignatureTokens() {
+    /**
+     * Abre um WebView em uma página de capítulo e captura o header x-toon-signature gerado
+     * pelo próprio site. Atualiza [authToken] ou [decoyToken] conforme o path da captura.
+     */
+    private fun captureTokenFromChapter(failedPath: String) {
         synchronized(this) {
             val now = System.currentTimeMillis()
-            if (now - lastTokenReloadAt < TOKEN_RELOAD_COOLDOWN_MS) return
-            lastTokenReloadAt = now
+            if (now - lastTokenCaptureAt < TOKEN_CAPTURE_COOLDOWN_MS) return
+            lastTokenCaptureAt = now
         }
 
         runCatching {
-            val indexJsUrl = cookieClient.newCall(GET(baseUrl, headers)).execute()
-                .asJsoup()
-                .selectFirst("script[src*=index]")
-                ?.absUrl("src")
-            if (indexJsUrl != null) {
-                val js = cookieClient.newCall(GET(indexJsUrl, headers)).execute().body.string()
-                val match = TOKEN_REGEX.find(js)
-                if (match != null) {
-                    val newAuth = match.groupValues[1]
-                    val newDecoy = match.groupValues[2]
-                    if (newAuth.isNotBlank() && newDecoy.isNotBlank()) {
-                        authToken = newAuth
-                        decoyToken = newDecoy
+            // Usa o path do capítulo que falhou para montar a URL da página (não da API)
+            val chapterPageUrl = baseUrl + failedPath.substringBeforeLast("/chapters") + "/1" // slug/número qualquer
+            val capturedToken = fetchLiveTokenFromWebView(chapterPageUrl)
+            if (capturedToken != null) {
+                // Atualiza o token apropriado
+                if (failedPath.contains("/chapters")) {
+                    authToken = capturedToken
+                } else {
+                    decoyToken = capturedToken
+                }
+            }
+        }
+    }
+
+    /**
+     * Abre um WebView oculto, injeta um script que intercepta fetch/XHR e retorna o
+     * primeiro valor de x-toon-signature encontrado em requisições à API de mangás.
+     */
+    private suspend fun fetchLiveTokenFromWebView(pageUrl: String): String? {
+        return withContext(Dispatchers.Main) {
+            suspendCoroutine { cont ->
+                val handler = Handler(Looper.getMainLooper())
+                val latch = CountDownLatch(1)
+                var webView: WebView? = null
+                var capturedToken: String? = null
+
+                handler.post {
+                    try {
+                        val view = WebView(applicationContext)
+                        webView = view
+                        with(view.settings) {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            if (!userAgent.isNullOrBlank()) userAgentString = userAgent
+                        }
+
+                        view.webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView, url: String) {
+                                // Injeta o interceptor
+                                view.evaluateJavascript("""
+                                    (function() {
+                                        const capture = (sig) => {
+                                            window._capturedSignature = sig;
+                                        };
+                                        const origFetch = window.fetch;
+                                        window.fetch = function(...args) {
+                                            const url = args[0].toString();
+                                            const opts = args[1] || {};
+                                            if (url.includes('/api/mangas/')) {
+                                                if (opts.headers) {
+                                                    const sig = opts.headers instanceof Headers ? 
+                                                        opts.headers.get('x-toon-signature') : 
+                                                        opts.headers['x-toon-signature'];
+                                                    if (sig) capture(sig);
+                                                }
+                                            }
+                                            return origFetch.apply(this, args);
+                                        };
+                                        const origXHR = window.XMLHttpRequest;
+                                        window.XMLHttpRequest = function() {
+                                            const xhr = new origXHR();
+                                            const origSetHeader = xhr.setRequestHeader;
+                                            xhr.setRequestHeader = function(header, value) {
+                                                if (header.toLowerCase() === 'x-toon-signature') {
+                                                    capture(value);
+                                                }
+                                                return origSetHeader.apply(this, arguments);
+                                            };
+                                            return xhr;
+                                        };
+                                    })();
+                                """.trimIndent(), null)
+                            }
+                        }
+
+                        view.loadUrl(pageUrl)
+
+                        // Espera até 15 segundos pela captura
+                        Thread {
+                            var elapsed = 0
+                            while (elapsed < 15_000) {
+                                if (capturedToken != null) break
+                                Thread.sleep(500)
+                                handler.post {
+                                    view.evaluateJavascript("window._capturedSignature") { result ->
+                                        if (result != null && result != "null" && result.isNotEmpty()) {
+                                            capturedToken = result.trim('"')
+                                        }
+                                    }
+                                }
+                                elapsed += 500
+                            }
+                            latch.countDown()
+                        }.start()
+                    } catch (e: Exception) {
+                        latch.countDown()
                     }
                 }
+
+                latch.await(20, TimeUnit.SECONDS)
+                handler.post { webView?.destroy() }
+                cont.resume(capturedToken)
             }
         }
     }
@@ -151,13 +252,8 @@ class ReadingGateInterceptor(
         private const val DEFAULT_DECOY_TOKEN = "v9_decoy_k8"
 
         private const val REFRESH_COOLDOWN_MS = 60_000L
-        private const val TOKEN_RELOAD_COOLDOWN_MS = 30_000L
+        private const val TOKEN_CAPTURE_COOLDOWN_MS = 1800_000L // 30 minutos
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
-
-        // Captura strings como "v9_auth_k8" e "v9_decoy_k8"
-        private val TOKEN_REGEX = Regex(
-            """["'](v\d+_auth_\w+)["'].*?["'](v\d+_decoy_\w+)["']""",
-        )
     }
 }
