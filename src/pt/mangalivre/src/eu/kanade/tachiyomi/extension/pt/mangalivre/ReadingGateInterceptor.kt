@@ -31,6 +31,7 @@ class ReadingGateInterceptor(
 
     @Volatile
     private var cachedToken: String? = null
+
     @Volatile
     private var tokenExpiration: Long = 0L
 
