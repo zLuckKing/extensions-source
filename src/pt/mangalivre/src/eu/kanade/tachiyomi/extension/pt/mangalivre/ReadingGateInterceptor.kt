@@ -3,6 +3,9 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.network.GET
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -26,13 +29,11 @@ class ReadingGateInterceptor(
     @Volatile
     private var lastPrimeAttemptAt = 0L
 
-    // Token JWT extraído da meta tag "t-seed" das páginas de capítulo
     @Volatile
     private var cachedToken: String? = null
     @Volatile
     private var tokenExpiration: Long = 0L
 
-    // Último readerPath conhecido (para buscar o token)
     @Volatile
     private var lastReaderPath: String? = null
 
@@ -42,7 +43,6 @@ class ReadingGateInterceptor(
             return chain.proceed(request)
         }
 
-        // Armazena o readerPath se presente na tag
         val readerPath = request.tag(ReaderPath::class.java)?.path
         if (readerPath != null) {
             lastReaderPath = readerPath
@@ -119,41 +119,43 @@ class ReadingGateInterceptor(
             .build()
     }
 
-    /**
-     * Garante que tenhamos um token JWT válido (não expirado).
-     * Se necessário, busca a página do capítulo para extrair um novo.
-     */
     private fun ensureToken(): String? {
         val now = System.currentTimeMillis()
-        val margin = 5 * 60 * 1000L // 5 minutos de margem
+        val margin = 5 * 60 * 1000L
 
         if (cachedToken != null && tokenExpiration > 0 && now < tokenExpiration - margin) {
             return cachedToken
         }
 
-        // Tenta renovar o token
-        Log.d("ReadingGate", "Token expirado ou ausente. Buscando novo token...")
+        Log.d("ReadingGate", "Token expirado ou ausente. Renovando...")
         refreshToken()
         return cachedToken
     }
 
-    /**
-     * Faz uma requisição HTTP à página do capítulo e extrai o token JWT da meta tag "t-seed".
-     */
     private fun refreshToken() {
         val path = lastReaderPath
-        if (path == null) {
-            Log.w("ReadingGate", "Nenhum readerPath conhecido para buscar token.")
-            return
+        if (path != null) {
+            val token = fetchTokenFromMeta(path)
+            if (token != null) return
         }
 
-        runCatching {
+        Log.d("ReadingGate", "Meta tag falhou, tentando /api/seed...")
+        val token = fetchTokenFromApi()
+        if (token != null) return
+
+        Log.e("ReadingGate", "Não foi possível obter token de nenhuma fonte.")
+    }
+
+    private fun fetchTokenFromMeta(path: String): String? {
+        return runCatching {
             val pageUrl = baseUrl + path
             val cookieValue = getToonVCookie()
             val pageHeaders = headers.newBuilder().apply {
                 if (cookieValue != null) {
                     add("Cookie", "toon_v=$cookieValue")
                 }
+                // Referer: URL da obra (ex.: https://toonlivre.net/manga/slug)
+                add("Referer", baseUrl + "/" + path.substringBefore("/", path.indexOf("/", 1)))
             }.build()
 
             val request = GET(pageUrl, pageHeaders)
@@ -161,37 +163,66 @@ class ReadingGateInterceptor(
             val html = response.body.string()
 
             val metaRegex = Regex(
-                """<meta[^>]+name=["']t-seed["'][^>]+content=["']([^"']+)["']""",
+                """<meta[^>]*?name=["']t-seed["'][^>]*?content=["']([^"']+)["']""",
                 RegexOption.IGNORE_CASE,
             )
             val match = metaRegex.find(html)
             if (match != null) {
                 val token = match.groupValues[1]
-                val parts = token.split(".")
-                if (parts.size == 3) {
-                    val payloadJson = String(
-                        Base64.decode(
-                            parts[1].replace('-', '+').replace('_', '/'),
-                            Base64.DEFAULT,
-                        ),
-                    )
-                    val json = JSONObject(payloadJson)
-                    val exp = json.optLong("exp", 0)
-                    if (exp > 0) {
-                        cachedToken = token
-                        tokenExpiration = exp * 1000L
-                        Log.d("ReadingGate", "Token atualizado com sucesso. Expira em ${(tokenExpiration - System.currentTimeMillis()) / 1000}s")
-                    } else {
-                        Log.e("ReadingGate", "Token JWT sem campo 'exp'")
-                    }
-                } else {
-                    Log.e("ReadingGate", "Token JWT não possui três partes")
+                if (validateAndCacheToken(token)) {
+                    Log.d("ReadingGate", "Token obtido da meta tag.")
+                    return token
                 }
-            } else {
-                Log.e("ReadingGate", "Meta tag 't-seed' não encontrada na página do capítulo")
             }
+            null
         }.onFailure {
-            Log.e("ReadingGate", "Falha ao obter token: ${it.message}")
+            Log.e("ReadingGate", "Falha ao buscar meta tag: ${it.message}")
+        }.getOrNull()
+    }
+
+    private fun fetchTokenFromApi(): String? {
+        return runCatching {
+            val apiUrl = "$baseUrl/api/seed"
+            val request = GET(apiUrl, headers)
+            val response = cookieClient.newCall(request).execute()
+            val json = response.parseAs<JsonObject>()
+            val token = json["token"]?.jsonPrimitive?.content
+            if (token != null && validateAndCacheToken(token)) {
+                Log.d("ReadingGate", "Token obtido da API /api/seed.")
+                return token
+            }
+            null
+        }.onFailure {
+            Log.e("ReadingGate", "Falha ao buscar /api/seed: ${it.message}")
+        }.getOrNull()
+    }
+
+    private fun validateAndCacheToken(token: String): Boolean {
+        val parts = token.split(".")
+        if (parts.size != 3) {
+            Log.e("ReadingGate", "Token JWT inválido: não tem 3 partes.")
+            return false
+        }
+        try {
+            val payloadJson = String(
+                Base64.decode(
+                    parts[1].replace('-', '+').replace('_', '/'),
+                    Base64.DEFAULT,
+                ),
+            )
+            val json = JSONObject(payloadJson)
+            val exp = json.optLong("exp", 0)
+            if (exp == 0L) {
+                Log.e("ReadingGate", "Token JWT sem campo 'exp'.")
+                return false
+            }
+            cachedToken = token
+            tokenExpiration = exp * 1000L
+            Log.d("ReadingGate", "Token válido. Expira em ${(tokenExpiration - System.currentTimeMillis()) / 1000}s")
+            return true
+        } catch (e: Exception) {
+            Log.e("ReadingGate", "Erro ao decodificar token JWT: ${e.message}")
+            return false
         }
     }
 
