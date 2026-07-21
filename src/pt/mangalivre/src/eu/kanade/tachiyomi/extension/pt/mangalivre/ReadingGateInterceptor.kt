@@ -133,38 +133,31 @@ class ReadingGateInterceptor(
                 val js = cookieClient.newCall(GET(indexJsUrl, headers)).execute().body.string()
                 val match = TOKEN_REGEX.find(js)
                 if (match != null) {
-                    val authStr = parseAsciiArray(match.groupValues[1])
-                    val decoyStr = parseAsciiArray(match.groupValues[2])
-                    if (authStr != null && decoyStr != null) {
-                        authToken = authStr
-                        decoyToken = decoyStr
+                    val newAuth = match.groupValues[1]
+                    val newDecoy = match.groupValues[2]
+                    if (newAuth.isNotBlank() && newDecoy.isNotBlank()) {
+                        authToken = newAuth
+                        decoyToken = newDecoy
                     }
                 }
             }
         }
     }
 
-    private fun parseAsciiArray(arrayLiteral: String): String? = try {
-        arrayLiteral.split(",")
-            .map { it.trim().toInt().toChar() }
-            .joinToString("")
-    } catch (e: Exception) {
-        null
-    }
-
     data class ReaderPath(val path: String)
 
     companion object {
-        private const val DEFAULT_AUTH_TOKEN = "t8v_authX9"
-        private const val DEFAULT_DECOY_TOKEN = "t8v_decoy9"
+        private const val DEFAULT_AUTH_TOKEN = "v9_auth_k8"
+        private const val DEFAULT_DECOY_TOKEN = "v9_decoy_k8"
 
         private const val REFRESH_COOLDOWN_MS = 60_000L
         private const val TOKEN_RELOAD_COOLDOWN_MS = 30_000L
         private const val NON_JSON_MESSAGE =
             "Não foi possível decifrar a resposta. Abra a fonte na WebView do app e tente de novo."
 
+        // Captura strings como "v9_auth_k8" e "v9_decoy_k8"
         private val TOKEN_REGEX = Regex(
-            """\[(\d{2,3}(?:,\s*\d{2,3}){5,})\] .*? \[(\d{2,3}(?:,\s*\d{2,3}){5,})\]""",
+            """["'](v\d+_auth_\w+)["'].*?["'](v\d+_decoy_\w+)["']""",
         )
     }
 }
