@@ -114,10 +114,24 @@ class MangaLivreDecryptor(
                     domStorageEnabled = false
                 }
 
-                // Remove import/export para permitir eval no escopo global
-                val sanitizedJs = indexJsCode
-                    .replace(Regex("""export\s+(default\s+)?(class|function|\{)\s*"""), "// export ")
-                    .replace(Regex("""import\s+.*?from\s+['"][^'"]+['"]\s*;?"""), "// import ")
+                // Sanitização robusta de módulos ES:
+                // Comenta linhas que começam com "export" ou "import"
+                val lines = indexJsCode.split("\n")
+                val sanitizedLines = lines.map { line ->
+                    val trimmed = line.trimStart()
+                    when {
+                        trimmed.startsWith("export {") -> "// $line"
+                        trimmed.startsWith("export default") -> "// $line"
+                        trimmed.startsWith("export const") ||
+                        trimmed.startsWith("export function") ||
+                        trimmed.startsWith("export class") ||
+                        trimmed.startsWith("export let") ||
+                        trimmed.startsWith("export var") -> "// $line"
+                        trimmed.startsWith("import ") -> "// $line"
+                        else -> line
+                    }
+                }
+                val sanitizedJs = sanitizedLines.joinToString("\n")
 
                 val escapedJs = JSONObject.quote(sanitizedJs)
 
@@ -147,13 +161,11 @@ class MangaLivreDecryptor(
                 """.trimIndent()
 
                 view.evaluateJavascript(script) { rawResult ->
-                    // Remove aspas externas e caracteres de escape
                     val cleanResult = rawResult
                         .trim('"')
                         .replace("\\\"", "\"")
                         .replace("\\n", "\n")
 
-                    // Usando Log.e para garantir que apareça no logcat
                     Log.e("MangaLivreDecryptor", "WebView clean result: $cleanResult")
 
                     if (cleanResult.startsWith("error:")) {
