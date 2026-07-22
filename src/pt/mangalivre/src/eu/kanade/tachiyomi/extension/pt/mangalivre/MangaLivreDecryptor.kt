@@ -125,7 +125,6 @@ class MangaLivreDecryptor(
                     (function() {
                         try {
                             eval($escapedJs);
-                            // Procura qualquer função global que use getUTCFullYear
                             const fn = Object.values(window).find(f =>
                                 typeof f === 'function' &&
                                 f.toString().includes('getUTCFullYear')
@@ -147,16 +146,26 @@ class MangaLivreDecryptor(
                     })();
                 """.trimIndent()
 
-                view.evaluateJavascript(script) { jsonStr ->
+                view.evaluateJavascript(script) { rawResult ->
+                    // Remove aspas externas e escapa caracteres para JSON válido
+                    val cleanResult = if (rawResult.startsWith("\"") && rawResult.endsWith("\""))
+                        rawResult.substring(1, rawResult.length - 1).replace("\\\"", "\"")
+                    else rawResult
+
+                    Log.d("MangaLivreDecryptor", "WebView clean result: $cleanResult")
+
                     try {
-                        val json = JSONObject(jsonStr)
+                        val json = JSONObject(cleanResult)
                         if (!json.has("error")) {
-                            result = Constants(json.getString("hostPart"), json.getString("encKey"))
+                            val hostPart = json.getString("hostPart")
+                            val encKey = json.getString("encKey")
+                            result = Constants(hostPart, encKey)
+                            Log.d("MangaLivreDecryptor", "WebView extraiu: host=$hostPart, encKey=$encKey")
                         } else {
                             Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
                         }
                     } catch (e: Exception) {
-                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result", e)
+                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result: $e")
                     }
                     latch.countDown()
                 }
