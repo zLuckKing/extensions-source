@@ -5,6 +5,7 @@ import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.applicationContext
@@ -16,7 +17,6 @@ import keiyoushi.utils.stringOrNull
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import org.json.JSONObject
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -65,7 +65,7 @@ class MangaLivreDecryptor(
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
 
-                // Tentativa 1: regex genérica (rápida)
+                // Tentativa 1: regex (rápida)
                 val match = EV_CONSTANTS_REGEX.find(js)
                 lastReloadMatched = match != null
                 if (match != null) {
@@ -74,14 +74,14 @@ class MangaLivreDecryptor(
                     return@runCatching
                 }
 
-                // Tentativa 2: eval do bundle sanitizado no WebView (definitivo)
-                Log.w("MangaLivreDecryptor", "Regex falhou – extraindo via eval no WebView...")
-                val extracted = extractConstantsViaWebViewEval(js)
+                // Tentativa 2: WebView com página real e polling (infalível)
+                Log.w("MangaLivreDecryptor", "Regex falhou – extraindo via página real no WebView...")
+                val extracted = extractConstantsViaWebViewReal()
                 if (extracted != null) {
                     constants = extracted
                     lastReloadMatched = true
                     lastReloadError = null
-                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via WebView (eval).")
+                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via WebView (página real).")
                 } else {
                     lastReloadError = "WebView fallback failed"
                     Log.e("MangaLivreDecryptor", "WebView não conseguiu extrair constantes.")
@@ -94,12 +94,10 @@ class MangaLivreDecryptor(
     }
 
     /**
-     * Executa o código do index.js em um WebView oculto após remover declarações
-     * de módulo (import/export), tornando as funções globais. Em seguida,
-     * encontra a função de derivação pela assinatura (getUTCFullYear) e extrai
-     * hostPart e encKey.
+     * Carrega a página real do site em um WebView oculto, espera a função de segurança
+     * (sv ou similar) aparecer no escopo global e extrai hostPart/encKey.
      */
-    private fun extractConstantsViaWebViewEval(indexJsCode: String): Constants? {
+    private fun extractConstantsViaWebViewReal(): Constants? {
         val handler = Handler(Looper.getMainLooper())
         val latch = CountDownLatch(1)
         var result: Constants? = null
@@ -111,84 +109,89 @@ class MangaLivreDecryptor(
                 webView = view
                 with(view.settings) {
                     javaScriptEnabled = true
-                    domStorageEnabled = false
-                }
-
-                // Sanitização robusta de módulos ES:
-                // Comenta linhas que começam com "export" ou "import"
-                val lines = indexJsCode.split("\n")
-                val sanitizedLines = lines.map { line ->
-                    val trimmed = line.trimStart()
-                    when {
-                        trimmed.startsWith("export {") -> "// $line"
-                        trimmed.startsWith("export default") -> "// $line"
-                        trimmed.startsWith("export const") ||
-                            trimmed.startsWith("export function") ||
-                            trimmed.startsWith("export class") ||
-                            trimmed.startsWith("export let") ||
-                            trimmed.startsWith("export var") -> "// $line"
-                        trimmed.startsWith("import ") -> "// $line"
-                        else -> line
+                    domStorageEnabled = true
+                    if (!headers["User-Agent"].isNullOrBlank()) {
+                        userAgentString = headers["User-Agent"]
                     }
                 }
-                val sanitizedJs = sanitizedLines.joinToString("\n")
 
-                val escapedJs = JSONObject.quote(sanitizedJs)
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String) {
+                        Log.d("MangaLivreDecryptor", "Página carregada. Iniciando busca pela função...")
+                        // Polling: verifica a cada 500ms se a função já está disponível
+                        val startTime = System.currentTimeMillis()
+                        val maxWait = 15_000L // 15 segundos
+                        val checkInterval = 500L
 
-                val script = """
-                    (function() {
-                        try {
-                            eval($escapedJs);
-                            const fn = Object.values(window).find(f =>
-                                typeof f === 'function' &&
-                                f.toString().includes('getUTCFullYear')
-                            );
-                            if (!fn) return 'error:No function found';
-                            const pwd = fn();
-                            if (!pwd || pwd.length < 10) return 'error:Invalid password: ' + pwd;
-                            const encKey = pwd.substring(0, pwd.length - 8);
-                            const code = fn.toString();
-                            const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
-                            const hostPart = hostMatch ? hostMatch[1] : '';
-                            if (encKey.length < 5 || hostPart.length < 5) {
-                                return 'error:Extracted values too short';
+                        val pollRunnable = object : Runnable {
+                            override fun run() {
+                                val elapsed = System.currentTimeMillis() - startTime
+                                if (elapsed > maxWait) {
+                                    Log.e("MangaLivreDecryptor", "Timeout esperando a função de segurança.")
+                                    latch.countDown()
+                                    return
+                                }
+
+                                view.evaluateJavascript("""
+                                    (function() {
+                                        try {
+                                            const fn = Object.values(window).find(f =>
+                                                typeof f === 'function' &&
+                                                f.toString().includes('getUTCFullYear')
+                                            );
+                                            if (!fn) return JSON.stringify({ found: false });
+                                            const pwd = fn();
+                                            if (!pwd || pwd.length < 10) return JSON.stringify({ error: 'Invalid password' });
+                                            const encKey = pwd.substring(0, pwd.length - 8);
+                                            const code = fn.toString();
+                                            const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
+                                            const hostPart = hostMatch ? hostMatch[1] : '';
+                                            return JSON.stringify({ found: true, hostPart, encKey });
+                                        } catch(e) {
+                                            return JSON.stringify({ error: e.message });
+                                        }
+                                    })();
+                                """.trimIndent()) { jsonStr ->
+                                    try {
+                                        val cleanJson = jsonStr.trim('"').replace("\\\"", "\"")
+                                        val json = org.json.JSONObject(cleanJson)
+                                        if (json.optBoolean("found", false)) {
+                                            result = Constants(json.getString("hostPart"), json.getString("encKey"))
+                                            Log.d("MangaLivreDecryptor", "Função encontrada e extraída com sucesso.")
+                                            latch.countDown()
+                                        } else if (json.has("error")) {
+                                            Log.e("MangaLivreDecryptor", "Erro ao extrair: ${json.getString("error")}")
+                                            latch.countDown()
+                                        } else {
+                                            // Função ainda não encontrada, agenda nova verificação
+                                            handler.postDelayed(this, checkInterval)
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e("MangaLivreDecryptor", "Falha ao parsear resultado do poll", e)
+                                        latch.countDown()
+                                    }
+                                }
                             }
-                            return hostPart + '||' + encKey;
-                        } catch(e) {
-                            return 'error:' + e.message;
                         }
-                    })();
-                """.trimIndent()
 
-                view.evaluateJavascript(script) { rawResult ->
-                    val cleanResult = rawResult
-                        .trim('"')
-                        .replace("\\\"", "\"")
-                        .replace("\\n", "\n")
-
-                    Log.e("MangaLivreDecryptor", "WebView clean result: $cleanResult")
-
-                    if (cleanResult.startsWith("error:")) {
-                        val errorMsg = cleanResult.substringAfter("error:")
-                        Log.e("MangaLivreDecryptor", "WebView JS error: $errorMsg")
-                    } else {
-                        val parts = cleanResult.split("||")
-                        if (parts.size == 2) {
-                            result = Constants(parts[0], parts[1])
-                            Log.e("MangaLivreDecryptor", "WebView extraiu: host=${parts[0]}, encKey=${parts[1]}")
-                        } else {
-                            Log.e("MangaLivreDecryptor", "Formato de retorno inesperado: $cleanResult")
-                        }
+                        // Inicia o primeiro check
+                        handler.postDelayed(pollRunnable, 1000) // aguarda 1s extra
                     }
-                    latch.countDown()
+
+                    override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
+                        Log.e("MangaLivreDecryptor", "WebView error: $description")
+                        latch.countDown()
+                    }
                 }
+
+                view.loadUrl(baseUrl)
             } catch (e: Exception) {
                 Log.e("MangaLivreDecryptor", "WebView setup failed", e)
                 latch.countDown()
             }
         }
 
-        latch.await(15, TimeUnit.SECONDS)
+        latch.await(20, TimeUnit.SECONDS)
         handler.post { webView?.destroy() }
         return result
     }
@@ -241,8 +244,6 @@ class MangaLivreDecryptor(
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Regex genérica: captura a string concatenada à data (mín. 10 caracteres)
-        // e a string antes do "+ hash" (mín. 5 caracteres)
         private val EV_CONSTANTS_REGEX = Regex(
             """getUTCFullYear\(\)[^}]*?"([^"]{10,})"[^}]*?return "([^"]{5,})"""",
         )
