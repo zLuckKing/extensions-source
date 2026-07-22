@@ -161,6 +161,8 @@ class MangaLivreDecryptor(
                             """.trimIndent()
 
                             view.evaluateJavascript(script) { jsonStr ->
+                                // Log temporário para diagnóstico
+                                Log.d("MangaLivreDecryptor", "WebView raw result: $jsonStr")
                                 try {
                                     val json = JSONObject(jsonStr)
                                     if (!json.has("error")) {
