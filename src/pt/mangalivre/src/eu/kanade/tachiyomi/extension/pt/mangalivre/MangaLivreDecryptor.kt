@@ -123,10 +123,10 @@ class MangaLivreDecryptor(
                         trimmed.startsWith("export {") -> "// $line"
                         trimmed.startsWith("export default") -> "// $line"
                         trimmed.startsWith("export const") ||
-                        trimmed.startsWith("export function") ||
-                        trimmed.startsWith("export class") ||
-                        trimmed.startsWith("export let") ||
-                        trimmed.startsWith("export var") -> "// $line"
+                            trimmed.startsWith("export function") ||
+                            trimmed.startsWith("export class") ||
+                            trimmed.startsWith("export let") ||
+                            trimmed.startsWith("export var") -> "// $line"
                         trimmed.startsWith("import ") -> "// $line"
                         else -> line
                     }
