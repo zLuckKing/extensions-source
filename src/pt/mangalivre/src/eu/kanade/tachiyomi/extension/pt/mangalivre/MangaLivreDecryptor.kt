@@ -16,12 +16,12 @@ import keiyoushi.utils.stringOrNull
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.OkHttpClient
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import org.json.JSONObject
 
 class MangaLivreDecryptor(
     private val baseUrl: String,
@@ -119,8 +119,8 @@ class MangaLivreDecryptor(
                             eval(arguments[0]);
                             
                             // Busca dinâmica por qualquer função que use getUTCFullYear e retorne algo
-                            const targetFn = Object.values(window).find(fn => 
-                                typeof fn === 'function' && 
+                            const targetFn = Object.values(window).find(fn =>
+                                typeof fn === 'function' &&
                                 fn.toString().includes('getUTCFullYear') &&
                                 fn.toString().includes('return')
                             );
@@ -135,18 +135,16 @@ class MangaLivreDecryptor(
                             const encMatch = svCode.match(/return "([^"]+)" \+/);
                             
                             if (hostMatch && encMatch) {
-                                return JSON.stringify({ 
-                                    hostPart: hostMatch[1], 
-                                    encKey: encMatch[1] 
+                                return JSON.stringify({
+                                    hostPart: hostMatch[1],
+                                    encKey: encMatch[1]
                                 });
                             }
                             
                             // Fallback: executa a função e tenta extrair a encKey do resultado
                             const resultStr = targetFn();
                             if (resultStr && resultStr.length > 10) {
-                                // A encKey geralmente está antes dos últimos 8 caracteres (hash)
                                 const possibleKey = resultStr.substring(0, resultStr.length - 8);
-                                // Tenta obter o hostPart de qualquer string longa no código
                                 const hostMatch2 = svCode.match(/"([^"]{10,})"/);
                                 const hostPart = hostMatch2 ? hostMatch2[0].replace(/"/g, '') : '';
                                 return JSON.stringify({ hostPart: hostPart, encKey: possibleKey });
@@ -233,7 +231,6 @@ class MangaLivreDecryptor(
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Regex como primeira tentativa (rápida)
         private val EV_CONSTANTS_REGEX = Regex(
             """getUTCFullYear\(\)[^}]*?"([^"]+)"\)[^}]*?return "([^"]+)"\+""",
         )
