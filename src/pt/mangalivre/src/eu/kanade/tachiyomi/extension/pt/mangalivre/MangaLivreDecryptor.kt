@@ -148,9 +148,11 @@ class MangaLivreDecryptor(
 
                 view.evaluateJavascript(script) { rawResult ->
                     // Remove aspas externas e escapa caracteres para JSON válido
-                    val cleanResult = if (rawResult.startsWith("\"") && rawResult.endsWith("\""))
+                    val cleanResult = if (rawResult.startsWith("\"") && rawResult.endsWith("\"")) {
                         rawResult.substring(1, rawResult.length - 1).replace("\\\"", "\"")
-                    else rawResult
+                    } else {
+                        rawResult
+                    }
 
                     Log.d("MangaLivreDecryptor", "WebView clean result: $cleanResult")
 
