@@ -17,6 +17,7 @@ import keiyoushi.utils.stringOrNull
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.OkHttpClient
+import org.json.JSONObject
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -132,7 +133,8 @@ class MangaLivreDecryptor(
                                     return
                                 }
 
-                                view.evaluateJavascript("""
+                                view.evaluateJavascript(
+                                    """
                                     (function() {
                                         try {
                                             const fn = Object.values(window).find(f =>
@@ -151,10 +153,11 @@ class MangaLivreDecryptor(
                                             return JSON.stringify({ error: e.message });
                                         }
                                     })();
-                                """.trimIndent()) { jsonStr ->
+                                    """.trimIndent(),
+                                ) { jsonStr ->
                                     try {
                                         val cleanJson = jsonStr.trim('"').replace("\\\"", "\"")
-                                        val json = org.json.JSONObject(cleanJson)
+                                        val json = JSONObject(cleanJson)
                                         if (json.optBoolean("found", false)) {
                                             result = Constants(json.getString("hostPart"), json.getString("encKey"))
                                             Log.d("MangaLivreDecryptor", "Função encontrada e extraída com sucesso.")
