@@ -117,30 +117,30 @@ class MangaLivreDecryptor(
                     (function() {
                         try {
                             eval(arguments[0]);
-                            
+
                             // Busca dinâmica por qualquer função que use getUTCFullYear e retorne algo
                             const targetFn = Object.values(window).find(fn =>
                                 typeof fn === 'function' &&
                                 fn.toString().includes('getUTCFullYear') &&
                                 fn.toString().includes('return')
                             );
-                            
+
                             if (!targetFn) {
                                 return JSON.stringify({ error: 'Security function not found' });
                             }
-                            
+
                             const svCode = targetFn.toString();
                             // Extrai as strings do código da função
                             const hostMatch = svCode.match(/\+ "([^"]{10,})"\)/);
                             const encMatch = svCode.match(/return "([^"]+)" \+/);
-                            
+
                             if (hostMatch && encMatch) {
                                 return JSON.stringify({
                                     hostPart: hostMatch[1],
                                     encKey: encMatch[1]
                                 });
                             }
-                            
+
                             // Fallback: executa a função e tenta extrair a encKey do resultado
                             const resultStr = targetFn();
                             if (resultStr && resultStr.length > 10) {
@@ -149,7 +149,7 @@ class MangaLivreDecryptor(
                                 const hostPart = hostMatch2 ? hostMatch2[0].replace(/"/g, '') : '';
                                 return JSON.stringify({ hostPart: hostPart, encKey: possibleKey });
                             }
-                            
+
                             return JSON.stringify({ error: 'Could not extract constants' });
                         } catch(e) {
                             return JSON.stringify({ error: e.message });
