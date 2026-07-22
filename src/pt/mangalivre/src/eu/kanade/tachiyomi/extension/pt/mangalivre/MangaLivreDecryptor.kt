@@ -29,7 +29,9 @@ class MangaLivreDecryptor(
     )
 
     @Volatile private var lastReloadAt = 0L
+
     @Volatile private var lastReloadMatched: Boolean? = null
+
     @Volatile private var lastReloadError: String? = null
 
     private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
