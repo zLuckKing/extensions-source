@@ -1,8 +1,13 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
+import android.util.Log
+import android.webkit.WebView
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.get
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.readIntBigEndian
@@ -14,6 +19,9 @@ import okhttp3.OkHttpClient
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import org.json.JSONObject
 
 class MangaLivreDecryptor(
     private val baseUrl: String,
@@ -21,7 +29,7 @@ class MangaLivreDecryptor(
     private val headers: Headers,
 ) {
 
-    @Volatile private var constants = Constants(DEFAULT_HOSTNAME_PART, DEFAULT_ANTIBOT_PART, DEFAULT_ENC_KEY)
+    @Volatile private var constants = Constants(DEFAULT_HOST_PART, DEFAULT_ENC_KEY)
 
     @Volatile private var lastReloadAt = 0L
 
@@ -29,7 +37,7 @@ class MangaLivreDecryptor(
 
     @Volatile private var lastReloadError: String? = null
 
-    private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
+    private data class Constants(val hostPart: String, val encKey: String)
 
     fun decrypt(cipherWrapperBody: String, dataKey: String): String? = runCatching {
         val ciphertext = cipherWrapperBody.parseAs<JsonElement>()[dataKey]?.stringOrNull
@@ -40,7 +48,7 @@ class MangaLivreDecryptor(
     fun debugInfo(): String {
         val c = constants
         return "reloadMatched=$lastReloadMatched reloadError=$lastReloadError " +
-            "host=${c.hostPart} antibot=${c.antibotPart} encKeyLen=${c.encKey.length}"
+            "host=${c.hostPart} encKeyLen=${c.encKey.length}"
     }
 
     fun reloadConstants() {
@@ -56,18 +64,125 @@ class MangaLivreDecryptor(
                 ?.absUrl("src")
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
+
+                // Tentativa 1: regex (rápido)
                 val match = EV_CONSTANTS_REGEX.find(js)
                 lastReloadMatched = match != null
                 if (match != null) {
-                    constants = Constants(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+                    constants = Constants(match.groupValues[1], match.groupValues[2])
+                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via regex.")
+                    return@runCatching
+                }
+
+                // Tentativa 2: fallback via WebView (definitivo)
+                Log.w("MangaLivreDecryptor", "Regex falhou – tentando extração via WebView...")
+                val extracted = extractConstantsViaWebView(js)
+                if (extracted != null) {
+                    constants = extracted
+                    lastReloadMatched = true
+                    lastReloadError = null
+                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via WebView.")
                 } else {
-                    lastReloadError = "no match in index.js"
+                    lastReloadError = "WebView fallback failed"
+                    Log.e("MangaLivreDecryptor", "WebView não conseguiu extrair constantes.")
                 }
             } else {
                 lastReloadMatched = false
                 lastReloadError = "no script[src*=index] found on baseUrl page"
             }
         }.onFailure { lastReloadError = it.javaClass.simpleName + ": " + it.message }
+    }
+
+    /**
+     * Injeta o código do index.js em um WebView oculto e localiza a função de derivação
+     * de senha analisando seu comportamento (usa getUTCFullYear() e SHA256),
+     * sem depender do nome da função.
+     */
+    private fun extractConstantsViaWebView(indexJsCode: String): Constants? {
+        val handler = Handler(Looper.getMainLooper())
+        val latch = CountDownLatch(1)
+        var result: Constants? = null
+        var webView: WebView? = null
+
+        handler.post {
+            try {
+                val view = WebView(applicationContext)
+                webView = view
+                with(view.settings) {
+                    javaScriptEnabled = true
+                    domStorageEnabled = false
+                }
+
+                val script = """
+                    (function() {
+                        try {
+                            eval(arguments[0]);
+                            
+                            // Busca dinâmica por qualquer função que use getUTCFullYear e retorne algo
+                            const targetFn = Object.values(window).find(fn => 
+                                typeof fn === 'function' && 
+                                fn.toString().includes('getUTCFullYear') &&
+                                fn.toString().includes('return')
+                            );
+                            
+                            if (!targetFn) {
+                                return JSON.stringify({ error: 'Security function not found' });
+                            }
+                            
+                            const svCode = targetFn.toString();
+                            // Extrai as strings do código da função
+                            const hostMatch = svCode.match(/\+ "([^"]{10,})"\)/);
+                            const encMatch = svCode.match(/return "([^"]+)" \+/);
+                            
+                            if (hostMatch && encMatch) {
+                                return JSON.stringify({ 
+                                    hostPart: hostMatch[1], 
+                                    encKey: encMatch[1] 
+                                });
+                            }
+                            
+                            // Fallback: executa a função e tenta extrair a encKey do resultado
+                            const resultStr = targetFn();
+                            if (resultStr && resultStr.length > 10) {
+                                // A encKey geralmente está antes dos últimos 8 caracteres (hash)
+                                const possibleKey = resultStr.substring(0, resultStr.length - 8);
+                                // Tenta obter o hostPart de qualquer string longa no código
+                                const hostMatch2 = svCode.match(/"([^"]{10,})"/);
+                                const hostPart = hostMatch2 ? hostMatch2[0].replace(/"/g, '') : '';
+                                return JSON.stringify({ hostPart: hostPart, encKey: possibleKey });
+                            }
+                            
+                            return JSON.stringify({ error: 'Could not extract constants' });
+                        } catch(e) {
+                            return JSON.stringify({ error: e.message });
+                        }
+                    })(arguments[0]);
+                """.trimIndent()
+
+                view.evaluateJavascript(script.replace("arguments[0]", "`${indexJsCode.replace("`", "\\`")}`")) { jsonStr ->
+                    try {
+                        val json = JSONObject(jsonStr)
+                        if (!json.has("error")) {
+                            val hostPart = json.getString("hostPart")
+                            val encKey = json.getString("encKey")
+                            result = Constants(hostPart, encKey)
+                        } else {
+                            Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result", e)
+                    }
+                    latch.countDown()
+                }
+            } catch (e: Exception) {
+                Log.e("MangaLivreDecryptor", "WebView setup failed", e)
+                latch.countDown()
+            }
+        }
+
+        latch.await(15, TimeUnit.SECONDS)
+        handler.post { webView?.destroy() }
+        return result
     }
 
     private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
@@ -84,18 +199,15 @@ class MangaLivreDecryptor(
         return String(plaintext, Charsets.UTF_8)
     }
 
-    // ---------- CORREÇÃO PRINCIPAL ----------
     private fun derivePassword(date: String = LocalDate.now(ZoneOffset.UTC).toString()): String {
         val c = constants
-        val toHash = "$date${c.hostPart}${c.antibotPart}"
-        // SHA-256 substitui MD5 (conforme função sv() do bundle atual)
+        val toHash = date + c.hostPart
         val sha256Part = MessageDigest.getInstance("SHA-256")
             .digest(toHash.toByteArray())
             .joinToString("") { "%02x".format(it) }
             .substring(0, 8)
         return c.encKey + sha256Part
     }
-    // ----------------------------------------
 
     private fun evpBytesToKey(password: ByteArray, salt: ByteArray, keyLen: Int = 16, ivLen: Int = 8): Pair<ByteArray, ByteArray> {
         val derived = ByteArray(keyLen + ivLen)
@@ -116,17 +228,14 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        // Constantes de fallback atualizadas (21/07/2026)
-        private const val DEFAULT_HOSTNAME_PART = "toonlivre.com::v8"
-        private const val DEFAULT_ANTIBOT_PART = "t8_4v2_b"
-        private const val DEFAULT_ENC_KEY = "Magnesium-Strike-Astonish3"
+        private const val DEFAULT_HOST_PART = "toonlivre.net::v9p6_2x8_j"
+        private const val DEFAULT_ENC_KEY = "Celestial-Raven-Invoke9"
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Regex robusta que captura as três atribuições consecutivas com .split("")
-        // após a chamada getUTCFullYear()
+        // Regex como primeira tentativa (rápida)
         private val EV_CONSTANTS_REGEX = Regex(
-            """getUTCFullYear\(\).*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(.*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(.*?[a-zA-Z]\s*=\s*"([^"]+)"\s*\.split\(""\)""",
+            """getUTCFullYear\(\)[^}]*?"([^"]+)"\)[^}]*?return "([^"]+)"\+""",
         )
     }
 }
