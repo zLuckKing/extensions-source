@@ -129,45 +129,44 @@ class MangaLivreDecryptor(
                                 typeof f === 'function' &&
                                 f.toString().includes('getUTCFullYear')
                             );
-                            if (!fn) return JSON.stringify({ error: 'No function found' });
+                            if (!fn) return 'error:No function found';
                             const pwd = fn();
-                            if (!pwd || pwd.length < 10) return JSON.stringify({ error: 'Invalid password: ' + pwd });
+                            if (!pwd || pwd.length < 10) return 'error:Invalid password: ' + pwd;
                             const encKey = pwd.substring(0, pwd.length - 8);
                             const code = fn.toString();
                             const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
                             const hostPart = hostMatch ? hostMatch[1] : '';
                             if (encKey.length < 5 || hostPart.length < 5) {
-                                return JSON.stringify({ error: 'Extracted values too short', encKey, hostPart });
+                                return 'error:Extracted values too short';
                             }
-                            return JSON.stringify({ hostPart, encKey });
+                            return hostPart + '||' + encKey;
                         } catch(e) {
-                            return JSON.stringify({ error: e.message });
+                            return 'error:' + e.message;
                         }
                     })();
                 """.trimIndent()
 
                 view.evaluateJavascript(script) { rawResult ->
-                    // Remove aspas externas e escapa caracteres para JSON válido
-                    val cleanResult = if (rawResult.startsWith("\"") && rawResult.endsWith("\"")) {
-                        rawResult.substring(1, rawResult.length - 1).replace("\\\"", "\"")
+                    // Remove aspas externas e caracteres de escape
+                    val cleanResult = rawResult
+                        .trim('"')
+                        .replace("\\\"", "\"")
+                        .replace("\\n", "\n")
+
+                    // Usando Log.e para garantir que apareça no logcat
+                    Log.e("MangaLivreDecryptor", "WebView clean result: $cleanResult")
+
+                    if (cleanResult.startsWith("error:")) {
+                        val errorMsg = cleanResult.substringAfter("error:")
+                        Log.e("MangaLivreDecryptor", "WebView JS error: $errorMsg")
                     } else {
-                        rawResult
-                    }
-
-                    Log.d("MangaLivreDecryptor", "WebView clean result: $cleanResult")
-
-                    try {
-                        val json = JSONObject(cleanResult)
-                        if (!json.has("error")) {
-                            val hostPart = json.getString("hostPart")
-                            val encKey = json.getString("encKey")
-                            result = Constants(hostPart, encKey)
-                            Log.d("MangaLivreDecryptor", "WebView extraiu: host=$hostPart, encKey=$encKey")
+                        val parts = cleanResult.split("||")
+                        if (parts.size == 2) {
+                            result = Constants(parts[0], parts[1])
+                            Log.e("MangaLivreDecryptor", "WebView extraiu: host=${parts[0]}, encKey=${parts[1]}")
                         } else {
-                            Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
+                            Log.e("MangaLivreDecryptor", "Formato de retorno inesperado: $cleanResult")
                         }
-                    } catch (e: Exception) {
-                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result: $e")
                     }
                     latch.countDown()
                 }
