@@ -113,8 +113,12 @@ class MangaLivreDecryptor(
                     domStorageEnabled = false
                 }
 
-                // Escapa corretamente o código JS usando JSONObject.quote
-                val escapedJs = JSONObject.quote(indexJsCode)
+                // Remove export/import para evitar erro de módulo no eval
+                val sanitizedJs = indexJsCode
+                    .replace(Regex("""export\s+(default\s+)?(class|function|\{)\s*"""), "// export $1$2 ")
+                    .replace(Regex("""import\s+.*?from\s+['"][^'"]+['"]\s*;?"""), "// import ")
+
+                val escapedJs = JSONObject.quote(sanitizedJs)
 
                 val script = """
                     (function() {
