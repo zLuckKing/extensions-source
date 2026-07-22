@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import android.util.Base64
+import android.util.Log
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.get
@@ -76,10 +77,6 @@ class MangaLivreDecryptor(
                 if (extracted == null) {
                     val match2 = REGEX_SIMPLE.find(js)
                     if (match2 != null) {
-                        // Nesse formato, hostPart e antibotPart vinham juntos em um único string.
-                        // Tentamos separar pelo padrão "::" e "_", mas podemos usar uma string combinada.
-                        // Para manter compatibilidade, usamos o hostPart combinado e antibotPart vazio.
-                        // Mas derivePassword espera ambos. Vamos adaptar: se antibotPart estiver vazio, usamos apenas hostPart.
                         val combinedHost = match2.groupValues[1]
                         extracted = Constants(combinedHost, "", match2.groupValues[2])
                         lastReloadMatched = true
@@ -167,9 +164,6 @@ class MangaLivreDecryptor(
             """(?:toISOString|getUTCFullYear).*?"([^"]{10,})".*?return\s*"([^"]{5,})"""",
             RegexOption.DOT_MATCHES_ALL,
         )
-
-        private fun String.logD() = android.util.Log.d("MangaLivreDecryptor", this)
-        private fun String.logE() = android.util.Log.e("MangaLivreDecryptor", this)
     }
 }
 
