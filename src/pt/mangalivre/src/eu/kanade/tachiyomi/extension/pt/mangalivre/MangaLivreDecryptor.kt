@@ -29,14 +29,31 @@ class MangaLivreDecryptor(
     )
 
     @Volatile private var lastReloadAt = 0L
-
     @Volatile private var lastReloadMatched: Boolean? = null
-
     @Volatile private var lastReloadError: String? = null
 
     private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
 
-    fun decrypt(cipherWrapperBody: String, dataKey: String): String? = runCatching {
+    /**
+     * Descriptografa o corpo da resposta. Em caso de falha, tenta recarregar
+     * as constantes (se a última recarga não falhou) e repete a operação uma vez.
+     */
+    fun decrypt(cipherWrapperBody: String, dataKey: String): String? {
+        val firstAttempt = decryptInternal(cipherWrapperBody, dataKey)
+        if (firstAttempt != null) return firstAttempt
+
+        // Só recarrega se a última tentativa não falhou explicitamente
+        if (lastReloadMatched != false) {
+            Log.w("MangaLivreDecryptor", "Descriptografia falhou. Tentando recarregar constantes...")
+            reloadConstants()
+            return decryptInternal(cipherWrapperBody, dataKey)
+        }
+
+        Log.e("MangaLivreDecryptor", "Descriptografia falhou e recarga já falhou anteriormente.")
+        return null
+    }
+
+    private fun decryptInternal(cipherWrapperBody: String, dataKey: String): String? = runCatching {
         val ciphertext = cipherWrapperBody.parseAs<JsonElement>()[dataKey]?.stringOrNull
             ?: return@runCatching null
         decryptRabbit(ciphertext, derivePassword()).takeIf { it.isValidJson() }
@@ -61,24 +78,28 @@ class MangaLivreDecryptor(
                 ?.absUrl("src")
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
-
-                // Tenta várias regex, da mais específica para a mais genérica
                 lastReloadMatched = false
                 var extracted: Constants? = null
 
-                // Regex 1: formato array (atual)
+                // Tenta as três regex em ordem: específica → simples → genérica
                 val match1 = REGEX_ARRAY.find(js)
                 if (match1 != null) {
                     extracted = Constants(match1.groupValues[1], match1.groupValues[2], match1.groupValues[3])
                     lastReloadMatched = true
                 }
 
-                // Regex 2: formato de concatenação simples (anterior)
                 if (extracted == null) {
                     val match2 = REGEX_SIMPLE.find(js)
                     if (match2 != null) {
-                        val combinedHost = match2.groupValues[1]
-                        extracted = Constants(combinedHost, "", match2.groupValues[2])
+                        extracted = Constants(match2.groupValues[1], "", match2.groupValues[2])
+                        lastReloadMatched = true
+                    }
+                }
+
+                if (extracted == null) {
+                    val match3 = REGEX_GENERIC.find(js)
+                    if (match3 != null) {
+                        extracted = Constants(match3.groupValues[1], "", match3.groupValues[2])
                         lastReloadMatched = true
                     }
                 }
@@ -86,7 +107,7 @@ class MangaLivreDecryptor(
                 if (extracted != null) {
                     constants = extracted
                     lastReloadError = null
-                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via regex: host=${constants.hostPart}, antibot=${constants.antibotPart}, encKey=${constants.encKey}")
+                    Log.d("MangaLivreDecryptor", "Constantes recarregadas: host=${constants.hostPart}, antibot=${constants.antibotPart}, encKey=${constants.encKey}")
                 } else {
                     lastReloadError = "no match in index.js"
                     Log.e("MangaLivreDecryptor", "Nenhuma regex capturou as constantes.")
@@ -148,18 +169,18 @@ class MangaLivreDecryptor(
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        // Regex para o formato array: ["data", "hostPart", "antibotPart"].join ... return "encKey"
+        // Regex específica para o formato array atual
         private val REGEX_ARRAY = Regex(
             """toISOString.*?\].*?join.*?"([^"]+)"\s*,\s*"([^"]+)"\s*\].*?return\s*"([^"]+)"\s*\+""",
             RegexOption.DOT_MATCHES_ALL,
         )
 
-        // Regex para o formato simples: data + "hostPart" ... return "encKey" +
+        // Regex para formato simples anterior
         private val REGEX_SIMPLE = Regex(
             """getUTCFullYear\(\)[^}]*?"([^"]{10,})"[^}]*?return "([^"]{5,})"\+""",
         )
 
-        // Fallback super genérico: captura qualquer string longa após a data e a string antes do return
+        // Regex genérica: captura qualquer string longa depois da data e antes do return
         private val REGEX_GENERIC = Regex(
             """(?:toISOString|getUTCFullYear).*?"([^"]{10,})".*?return\s*"([^"]{5,})"""",
             RegexOption.DOT_MATCHES_ALL,
@@ -198,7 +219,6 @@ private class Rabbit {
         c[7] = (kw[3] and 0xFFFF0000.toInt()) or (kw[0] and 0xFFFF)
 
         b = 0
-
         repeat(4) { nextState() }
 
         for (i in 0 until 8) {
@@ -250,7 +270,6 @@ private class Rabbit {
         var idx = 0
         while (idx < words.size) {
             nextState()
-
             val (s0, s1, s2, s3) = keystreamBlock()
 
             if (idx < words.size) words[idx] = words[idx] xor s0
