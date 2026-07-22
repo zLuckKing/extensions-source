@@ -95,81 +95,61 @@ class MangaLivreDecryptor(
     }
 
     /**
-     * Carrega a página inicial do site em um WebView oculto, espera o bundle
-     * ser executado e extrai as constantes diretamente da função de derivação
-     * (sv ou similar) no contexto da página real.
+     * Carrega a página inicial do site em um WebView oculto e extrai as constantes
+     * de derivação (hostPart e encKey) executando a função de segurança no contexto real.
      */
     private fun extractConstantsViaWebView(): Constants? {
+        Log.e("MangaLivreDecryptor", "WebView: método extractConstantsViaWebView chamado.")
+
         val handler = Handler(Looper.getMainLooper())
         val latch = CountDownLatch(1)
         var result: Constants? = null
         var webView: WebView? = null
 
         handler.post {
+            Log.e("MangaLivreDecryptor", "WebView: handler.post executado.")
             try {
-                Log.d("MangaLivreDecryptor", "WebView: criando e configurando...")
                 val view = WebView(applicationContext)
                 webView = view
                 with(view.settings) {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    if (!headers["User-Agent"].isNullOrBlank()) {
-                        userAgentString = headers["User-Agent"]
-                    }
                 }
+                Log.e("MangaLivreDecryptor", "WebView: WebView criado com sucesso.")
 
                 view.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String) {
-                        Log.d("MangaLivreDecryptor", "WebView: página carregada ($url). Aguardando 2s para scripts...")
-                        view.postDelayed({
-                            Log.d("MangaLivreDecryptor", "WebView: injetando script de extração...")
-                            val script = """
-                                (function() {
-                                    try {
-                                        const targetFn = Object.values(window).find(fn =>
-                                            typeof fn === 'function' &&
-                                            fn.toString().includes('getUTCFullYear') &&
-                                            fn.toString().includes('return')
-                                        );
-                                        if (!targetFn) {
-                                            return JSON.stringify({ error: 'No suitable function found' });
-                                        }
-                                        const password = targetFn();
-                                        if (!password || password.length < 10) {
-                                            return JSON.stringify({ error: 'Invalid password: ' + password });
-                                        }
-                                        const encKey = password.substring(0, password.length - 8);
-                                        const code = targetFn.toString();
-                                        const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
-                                        const hostPart = hostMatch ? hostMatch[1] : '';
-                                        if (encKey.length < 5 || hostPart.length < 5) {
-                                            return JSON.stringify({ error: 'Extracted values too short', encKey, hostPart });
-                                        }
-                                        return JSON.stringify({ hostPart, encKey });
-                                    } catch(e) {
-                                        return JSON.stringify({ error: e.message });
-                                    }
-                                })();
-                            """.trimIndent()
-
-                            view.evaluateJavascript(script) { jsonStr ->
-                                Log.d("MangaLivreDecryptor", "WebView raw result: $jsonStr")
+                        Log.e("MangaLivreDecryptor", "WebView: onPageFinished para $url")
+                        view.evaluateJavascript("""
+                            (function() {
                                 try {
-                                    val json = JSONObject(jsonStr)
-                                    if (!json.has("error")) {
-                                        val hostPart = json.getString("hostPart")
-                                        val encKey = json.getString("encKey")
-                                        result = Constants(hostPart, encKey)
-                                        Log.d("MangaLivreDecryptor", "WebView extraiu: host=$hostPart, encKey=$encKey")
-                                    } else {
-                                        Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("MangaLivreDecryptor", "Failed to parse WebView result", e)
+                                    const fn = Object.values(window).find(f => typeof f === 'function' && f.toString().includes('getUTCFullYear'));
+                                    if (!fn) return JSON.stringify({ error: 'No function found' });
+                                    const pwd = fn();
+                                    if (!pwd || pwd.length < 10) return JSON.stringify({ error: 'Invalid password: ' + pwd });
+                                    const encKey = pwd.substring(0, pwd.length - 8);
+                                    const hostMatch = fn.toString().match(/\+ "([^"]{10,})"\)/);
+                                    const hostPart = hostMatch ? hostMatch[1] : '';
+                                    return JSON.stringify({ hostPart, encKey });
+                                } catch(e) { return JSON.stringify({ error: e.message }); }
+                            })();
+                        """.trimIndent()) { jsonStr ->
+                            Log.e("MangaLivreDecryptor", "WebView raw result: $jsonStr")
+                            try {
+                                val json = JSONObject(jsonStr)
+                                if (!json.has("error")) {
+                                    val hostPart = json.getString("hostPart")
+                                    val encKey = json.getString("encKey")
+                                    result = Constants(hostPart, encKey)
+                                    Log.e("MangaLivreDecryptor", "WebView extraiu: host=$hostPart, encKey=$encKey")
+                                } else {
+                                    Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
                                 }
-                                latch.countDown()
+                            } catch (e: Exception) {
+                                Log.e("MangaLivreDecryptor", "Failed to parse WebView result: $e")
                             }
-                        }, 2000)
+                            latch.countDown()
+                        }
                     }
 
                     override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
@@ -178,17 +158,17 @@ class MangaLivreDecryptor(
                     }
                 }
 
-                Log.d("MangaLivreDecryptor", "WebView: carregando $baseUrl ...")
+                Log.e("MangaLivreDecryptor", "WebView: carregando $baseUrl ...")
                 view.loadUrl(baseUrl)
             } catch (e: Exception) {
-                Log.e("MangaLivreDecryptor", "WebView setup failed", e)
+                Log.e("MangaLivreDecryptor", "WebView setup error: $e")
                 latch.countDown()
             }
         }
 
-        Log.d("MangaLivreDecryptor", "WebView: aguardando até 30s...")
+        Log.e("MangaLivreDecryptor", "WebView: aguardando latch (30s)...")
         val finished = latch.await(30, TimeUnit.SECONDS)
-        Log.d("MangaLivreDecryptor", "WebView: latch liberado (timeout=${!finished})")
+        Log.e("MangaLivreDecryptor", "WebView: latch liberado, timeout=${!finished}, result=$result")
         handler.post { webView?.destroy() }
         return result
     }
@@ -236,7 +216,6 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        // Essas constantes são apenas um fallback; o WebView as substituirá automaticamente.
         private const val DEFAULT_HOST_PART = "toonlivre.net::v9p6_2x8_j"
         private const val DEFAULT_ENC_KEY = "Celestial-Raven-Invoke9"
 
