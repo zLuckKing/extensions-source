@@ -39,6 +39,9 @@ class MangaLivreDecryptor(
 
     private data class Constants(val hostPart: String, val encKey: String)
 
+    /** Resultado detalhado da extração via WebView, incluindo o motivo da falha quando houver. */
+    private data class WebViewExtractionResult(val constants: Constants?, val error: String?)
+
     fun decrypt(cipherWrapperBody: String, dataKey: String): String? = runCatching {
         val ciphertext = cipherWrapperBody.parseAs<JsonElement>()[dataKey]?.stringOrNull
             ?: return@runCatching null
@@ -70,21 +73,22 @@ class MangaLivreDecryptor(
                 lastReloadMatched = match != null
                 if (match != null) {
                     constants = Constants(match.groupValues[1], match.groupValues[2])
+                    lastReloadError = null
                     Log.d("MangaLivreDecryptor", "Constantes recarregadas via regex.")
                     return@runCatching
                 }
 
                 // Tentativa 2: fallback via WebView (definitivo)
                 Log.w("MangaLivreDecryptor", "Regex falhou – tentando extração via WebView...")
-                val extracted = extractConstantsViaWebView(js)
-                if (extracted != null) {
-                    constants = extracted
+                val extraction = extractConstantsViaWebView(js)
+                if (extraction.constants != null) {
+                    constants = extraction.constants
                     lastReloadMatched = true
                     lastReloadError = null
                     Log.d("MangaLivreDecryptor", "Constantes recarregadas via WebView.")
                 } else {
-                    lastReloadError = "WebView fallback failed"
-                    Log.e("MangaLivreDecryptor", "WebView não conseguiu extrair constantes.")
+                    lastReloadError = "WebView fallback failed: ${extraction.error ?: "unknown"}"
+                    Log.e("MangaLivreDecryptor", "WebView não conseguiu extrair constantes: ${extraction.error}")
                 }
             } else {
                 lastReloadMatched = false
@@ -98,10 +102,11 @@ class MangaLivreDecryptor(
      * de senha analisando seu comportamento (usa getUTCFullYear() e SHA256),
      * sem depender do nome da função.
      */
-    private fun extractConstantsViaWebView(indexJsCode: String): Constants? {
+    private fun extractConstantsViaWebView(indexJsCode: String): WebViewExtractionResult {
         val handler = Handler(Looper.getMainLooper())
         val latch = CountDownLatch(1)
         var result: Constants? = null
+        var errorMessage: String? = null
         var webView: WebView? = null
 
         handler.post {
@@ -159,28 +164,35 @@ class MangaLivreDecryptor(
 
                 view.evaluateJavascript(script.replace("arguments[0]", "`${indexJsCode.replace("`", "\\`")}`")) { jsonStr ->
                     try {
-                        val json = JSONObject(jsonStr)
+                        // evaluateJavascript devolve o retorno já serializado como string JSON
+                        // (com aspas escapadas); parseAs<String> desembrulha isso antes do JSONObject.
+                        val unwrapped = runCatching { jsonStr.parseAs<String>() }.getOrDefault(jsonStr)
+                        val json = JSONObject(unwrapped)
                         if (!json.has("error")) {
                             val hostPart = json.getString("hostPart")
                             val encKey = json.getString("encKey")
                             result = Constants(hostPart, encKey)
                         } else {
-                            Log.e("MangaLivreDecryptor", "WebView JS error: ${json.getString("error")}")
+                            errorMessage = json.getString("error")
+                            Log.e("MangaLivreDecryptor", "WebView JS error: $errorMessage")
                         }
                     } catch (e: Exception) {
-                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result", e)
+                        errorMessage = "parse failure: ${e.javaClass.simpleName}: ${e.message} raw=$jsonStr"
+                        Log.e("MangaLivreDecryptor", "Failed to parse WebView result: $jsonStr", e)
                     }
                     latch.countDown()
                 }
             } catch (e: Exception) {
+                errorMessage = "setup failure: ${e.javaClass.simpleName}: ${e.message}"
                 Log.e("MangaLivreDecryptor", "WebView setup failed", e)
                 latch.countDown()
             }
         }
 
-        latch.await(15, TimeUnit.SECONDS)
+        val completed = latch.await(15, TimeUnit.SECONDS)
+        if (!completed) errorMessage = "timeout after 15s waiting for evaluateJavascript"
         handler.post { webView?.destroy() }
-        return result
+        return WebViewExtractionResult(result, errorMessage)
     }
 
     private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
