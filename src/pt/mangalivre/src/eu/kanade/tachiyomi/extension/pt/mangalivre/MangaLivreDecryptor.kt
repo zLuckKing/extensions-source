@@ -120,7 +120,8 @@ class MangaLivreDecryptor(
                 view.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String) {
                         Log.e("MangaLivreDecryptor", "WebView: onPageFinished para $url")
-                        view.evaluateJavascript("""
+                        view.evaluateJavascript(
+                            """
                             (function() {
                                 try {
                                     const fn = Object.values(window).find(f => typeof f === 'function' && f.toString().includes('getUTCFullYear'));
@@ -133,7 +134,8 @@ class MangaLivreDecryptor(
                                     return JSON.stringify({ hostPart, encKey });
                                 } catch(e) { return JSON.stringify({ error: e.message }); }
                             })();
-                        """.trimIndent()) { jsonStr ->
+                            """.trimIndent(),
+                        ) { jsonStr ->
                             Log.e("MangaLivreDecryptor", "WebView raw result: $jsonStr")
                             try {
                                 val json = JSONObject(jsonStr)
