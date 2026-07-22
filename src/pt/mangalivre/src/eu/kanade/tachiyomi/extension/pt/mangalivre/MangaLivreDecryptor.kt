@@ -107,12 +107,12 @@ class MangaLivreDecryptor(
 
         handler.post {
             try {
+                Log.d("MangaLivreDecryptor", "WebView: criando e configurando...")
                 val view = WebView(applicationContext)
                 webView = view
                 with(view.settings) {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    // User-Agent realista (opcional, mas ajuda)
                     if (!headers["User-Agent"].isNullOrBlank()) {
                         userAgentString = headers["User-Agent"]
                     }
@@ -120,12 +120,12 @@ class MangaLivreDecryptor(
 
                 view.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView, url: String) {
-                        // Aguarda um pouco para garantir que todos os scripts foram executados
+                        Log.d("MangaLivreDecryptor", "WebView: página carregada ($url). Aguardando 2s para scripts...")
                         view.postDelayed({
+                            Log.d("MangaLivreDecryptor", "WebView: injetando script de extração...")
                             val script = """
                                 (function() {
                                     try {
-                                        // Busca qualquer função global que use getUTCFullYear e retorne algo
                                         const targetFn = Object.values(window).find(fn =>
                                             typeof fn === 'function' &&
                                             fn.toString().includes('getUTCFullYear') &&
@@ -134,25 +134,17 @@ class MangaLivreDecryptor(
                                         if (!targetFn) {
                                             return JSON.stringify({ error: 'No suitable function found' });
                                         }
-
-                                        // Executa a função para obter a senha completa
                                         const password = targetFn();
                                         if (!password || password.length < 10) {
                                             return JSON.stringify({ error: 'Invalid password: ' + password });
                                         }
-
-                                        // A senha é encKey + hash (8 caracteres hex)
                                         const encKey = password.substring(0, password.length - 8);
-
-                                        // Extrai hostPart do código da função
                                         const code = targetFn.toString();
                                         const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
                                         const hostPart = hostMatch ? hostMatch[1] : '';
-
                                         if (encKey.length < 5 || hostPart.length < 5) {
                                             return JSON.stringify({ error: 'Extracted values too short', encKey, hostPart });
                                         }
-
                                         return JSON.stringify({ hostPart, encKey });
                                     } catch(e) {
                                         return JSON.stringify({ error: e.message });
@@ -161,7 +153,6 @@ class MangaLivreDecryptor(
                             """.trimIndent()
 
                             view.evaluateJavascript(script) { jsonStr ->
-                                // Log temporário para diagnóstico
                                 Log.d("MangaLivreDecryptor", "WebView raw result: $jsonStr")
                                 try {
                                     val json = JSONObject(jsonStr)
@@ -178,7 +169,7 @@ class MangaLivreDecryptor(
                                 }
                                 latch.countDown()
                             }
-                        }, 2000) // 2 segundos de margem para scripts assíncronos
+                        }, 2000)
                     }
 
                     override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
@@ -187,6 +178,7 @@ class MangaLivreDecryptor(
                     }
                 }
 
+                Log.d("MangaLivreDecryptor", "WebView: carregando $baseUrl ...")
                 view.loadUrl(baseUrl)
             } catch (e: Exception) {
                 Log.e("MangaLivreDecryptor", "WebView setup failed", e)
@@ -194,7 +186,9 @@ class MangaLivreDecryptor(
             }
         }
 
-        latch.await(30, TimeUnit.SECONDS)
+        Log.d("MangaLivreDecryptor", "WebView: aguardando até 30s...")
+        val finished = latch.await(30, TimeUnit.SECONDS)
+        Log.d("MangaLivreDecryptor", "WebView: latch liberado (timeout=${!finished})")
         handler.post { webView?.destroy() }
         return result
     }
