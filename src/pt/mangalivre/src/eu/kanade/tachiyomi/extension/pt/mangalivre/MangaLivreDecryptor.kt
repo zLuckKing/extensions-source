@@ -1,14 +1,8 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import android.os.Handler
-import android.os.Looper
 import android.util.Base64
-import android.util.Log
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.applicationContext
 import keiyoushi.utils.get
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.readIntBigEndian
@@ -17,12 +11,9 @@ import keiyoushi.utils.stringOrNull
 import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.OkHttpClient
-import org.json.JSONObject
 import java.security.MessageDigest
 import java.time.LocalDate
 import java.time.ZoneOffset
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 class MangaLivreDecryptor(
     private val baseUrl: String,
@@ -30,7 +21,11 @@ class MangaLivreDecryptor(
     private val headers: Headers,
 ) {
 
-    @Volatile private var constants = Constants(DEFAULT_HOST_PART, DEFAULT_ENC_KEY)
+    @Volatile private var constants = Constants(
+        DEFAULT_HOST_PART,
+        DEFAULT_ANTIBOT_PART,
+        DEFAULT_ENC_KEY,
+    )
 
     @Volatile private var lastReloadAt = 0L
 
@@ -38,7 +33,7 @@ class MangaLivreDecryptor(
 
     @Volatile private var lastReloadError: String? = null
 
-    private data class Constants(val hostPart: String, val encKey: String)
+    private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
 
     fun decrypt(cipherWrapperBody: String, dataKey: String): String? = runCatching {
         val ciphertext = cipherWrapperBody.parseAs<JsonElement>()[dataKey]?.stringOrNull
@@ -49,7 +44,7 @@ class MangaLivreDecryptor(
     fun debugInfo(): String {
         val c = constants
         return "reloadMatched=$lastReloadMatched reloadError=$lastReloadError " +
-            "host=${c.hostPart} encKeyLen=${c.encKey.length}"
+            "host=${c.hostPart} antibot=${c.antibotPart} encKeyLen=${c.encKey.length}"
     }
 
     fun reloadConstants() {
@@ -66,137 +61,44 @@ class MangaLivreDecryptor(
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
 
-                // Tentativa 1: regex (rápida)
-                val match = EV_CONSTANTS_REGEX.find(js)
-                lastReloadMatched = match != null
-                if (match != null) {
-                    constants = Constants(match.groupValues[1], match.groupValues[2])
-                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via regex.")
-                    return@runCatching
+                // Tenta várias regex, da mais específica para a mais genérica
+                lastReloadMatched = false
+                var extracted: Constants? = null
+
+                // Regex 1: formato array (atual)
+                val match1 = REGEX_ARRAY.find(js)
+                if (match1 != null) {
+                    extracted = Constants(match1.groupValues[1], match1.groupValues[2], match1.groupValues[3])
+                    lastReloadMatched = true
                 }
 
-                // Tentativa 2: WebView com página real e polling (infalível)
-                Log.w("MangaLivreDecryptor", "Regex falhou – extraindo via página real no WebView...")
-                val extracted = extractConstantsViaWebViewReal()
+                // Regex 2: formato de concatenação simples (anterior)
+                if (extracted == null) {
+                    val match2 = REGEX_SIMPLE.find(js)
+                    if (match2 != null) {
+                        // Nesse formato, hostPart e antibotPart vinham juntos em um único string.
+                        // Tentamos separar pelo padrão "::" e "_", mas podemos usar uma string combinada.
+                        // Para manter compatibilidade, usamos o hostPart combinado e antibotPart vazio.
+                        // Mas derivePassword espera ambos. Vamos adaptar: se antibotPart estiver vazio, usamos apenas hostPart.
+                        val combinedHost = match2.groupValues[1]
+                        extracted = Constants(combinedHost, "", match2.groupValues[2])
+                        lastReloadMatched = true
+                    }
+                }
+
                 if (extracted != null) {
                     constants = extracted
-                    lastReloadMatched = true
                     lastReloadError = null
-                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via WebView (página real).")
+                    Log.d("MangaLivreDecryptor", "Constantes recarregadas via regex: host=${constants.hostPart}, antibot=${constants.antibotPart}, encKey=${constants.encKey}")
                 } else {
-                    lastReloadError = "WebView fallback failed"
-                    Log.e("MangaLivreDecryptor", "WebView não conseguiu extrair constantes.")
+                    lastReloadError = "no match in index.js"
+                    Log.e("MangaLivreDecryptor", "Nenhuma regex capturou as constantes.")
                 }
             } else {
                 lastReloadMatched = false
                 lastReloadError = "no script[src*=index] found on baseUrl page"
             }
         }.onFailure { lastReloadError = it.javaClass.simpleName + ": " + it.message }
-    }
-
-    /**
-     * Carrega a página real do site em um WebView oculto, espera a função de segurança
-     * (sv ou similar) aparecer no escopo global e extrai hostPart/encKey.
-     */
-    private fun extractConstantsViaWebViewReal(): Constants? {
-        val handler = Handler(Looper.getMainLooper())
-        val latch = CountDownLatch(1)
-        var result: Constants? = null
-        var webView: WebView? = null
-
-        handler.post {
-            try {
-                val view = WebView(applicationContext)
-                webView = view
-                with(view.settings) {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    if (!headers["User-Agent"].isNullOrBlank()) {
-                        userAgentString = headers["User-Agent"]
-                    }
-                }
-
-                view.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView, url: String) {
-                        Log.d("MangaLivreDecryptor", "Página carregada. Iniciando busca pela função...")
-                        // Polling: verifica a cada 500ms se a função já está disponível
-                        val startTime = System.currentTimeMillis()
-                        val maxWait = 15_000L // 15 segundos
-                        val checkInterval = 500L
-
-                        val pollRunnable = object : Runnable {
-                            override fun run() {
-                                val elapsed = System.currentTimeMillis() - startTime
-                                if (elapsed > maxWait) {
-                                    Log.e("MangaLivreDecryptor", "Timeout esperando a função de segurança.")
-                                    latch.countDown()
-                                    return
-                                }
-
-                                view.evaluateJavascript(
-                                    """
-                                    (function() {
-                                        try {
-                                            const fn = Object.values(window).find(f =>
-                                                typeof f === 'function' &&
-                                                f.toString().includes('getUTCFullYear')
-                                            );
-                                            if (!fn) return JSON.stringify({ found: false });
-                                            const pwd = fn();
-                                            if (!pwd || pwd.length < 10) return JSON.stringify({ error: 'Invalid password' });
-                                            const encKey = pwd.substring(0, pwd.length - 8);
-                                            const code = fn.toString();
-                                            const hostMatch = code.match(/\+ "([^"]{10,})"\)/);
-                                            const hostPart = hostMatch ? hostMatch[1] : '';
-                                            return JSON.stringify({ found: true, hostPart, encKey });
-                                        } catch(e) {
-                                            return JSON.stringify({ error: e.message });
-                                        }
-                                    })();
-                                    """.trimIndent(),
-                                ) { jsonStr ->
-                                    try {
-                                        val cleanJson = jsonStr.trim('"').replace("\\\"", "\"")
-                                        val json = JSONObject(cleanJson)
-                                        if (json.optBoolean("found", false)) {
-                                            result = Constants(json.getString("hostPart"), json.getString("encKey"))
-                                            Log.d("MangaLivreDecryptor", "Função encontrada e extraída com sucesso.")
-                                            latch.countDown()
-                                        } else if (json.has("error")) {
-                                            Log.e("MangaLivreDecryptor", "Erro ao extrair: ${json.getString("error")}")
-                                            latch.countDown()
-                                        } else {
-                                            // Função ainda não encontrada, agenda nova verificação
-                                            handler.postDelayed(this, checkInterval)
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e("MangaLivreDecryptor", "Falha ao parsear resultado do poll", e)
-                                        latch.countDown()
-                                    }
-                                }
-                            }
-                        }
-
-                        // Inicia o primeiro check
-                        handler.postDelayed(pollRunnable, 1000) // aguarda 1s extra
-                    }
-
-                    override fun onReceivedError(view: WebView, errorCode: Int, description: String, failingUrl: String) {
-                        Log.e("MangaLivreDecryptor", "WebView error: $description")
-                        latch.countDown()
-                    }
-                }
-
-                view.loadUrl(baseUrl)
-            } catch (e: Exception) {
-                Log.e("MangaLivreDecryptor", "WebView setup failed", e)
-                latch.countDown()
-            }
-        }
-
-        latch.await(20, TimeUnit.SECONDS)
-        handler.post { webView?.destroy() }
-        return result
     }
 
     private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
@@ -215,7 +117,7 @@ class MangaLivreDecryptor(
 
     private fun derivePassword(date: String = LocalDate.now(ZoneOffset.UTC).toString()): String {
         val c = constants
-        val toHash = date + c.hostPart
+        val toHash = date + c.hostPart + c.antibotPart
         val sha256Part = MessageDigest.getInstance("SHA-256")
             .digest(toHash.toByteArray())
             .joinToString("") { "%02x".format(it) }
@@ -242,18 +144,36 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        private const val DEFAULT_HOST_PART = "toonlivre.net::v9p6_2x8_j"
-        private const val DEFAULT_ENC_KEY = "Celestial-Raven-Invoke9"
+        // Constantes atuais (atualizado 22/07/2026)
+        private const val DEFAULT_HOST_PART = "toonlivre.net::w3"
+        private const val DEFAULT_ANTIBOT_PART = "r7_5m2_k"
+        private const val DEFAULT_ENC_KEY = "Phantom-Tide-Harvest8"
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
 
-        private val EV_CONSTANTS_REGEX = Regex(
-            """getUTCFullYear\(\)[^}]*?"([^"]{10,})"[^}]*?return "([^"]{5,})"""",
+        // Regex para o formato array: ["data", "hostPart", "antibotPart"].join ... return "encKey"
+        private val REGEX_ARRAY = Regex(
+            """toISOString.*?\].*?join.*?"([^"]+)"\s*,\s*"([^"]+)"\s*\].*?return\s*"([^"]+)"\s*\+""",
+            RegexOption.DOT_MATCHES_ALL,
         )
+
+        // Regex para o formato simples: data + "hostPart" ... return "encKey" +
+        private val REGEX_SIMPLE = Regex(
+            """getUTCFullYear\(\)[^}]*?"([^"]{10,})"[^}]*?return "([^"]{5,})"\+""",
+        )
+
+        // Fallback super genérico: captura qualquer string longa após a data e a string antes do return
+        private val REGEX_GENERIC = Regex(
+            """(?:toISOString|getUTCFullYear).*?"([^"]{10,})".*?return\s*"([^"]{5,})"""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+
+        private fun String.logD() = android.util.Log.d("MangaLivreDecryptor", this)
+        private fun String.logE() = android.util.Log.e("MangaLivreDecryptor", this)
     }
 }
 
-// Rabbit stream cipher (CryptoJS-compatible). Ported from KuroMangasDecryptor.kt — same site template.
+// Rabbit stream cipher (CryptoJS-compatible)
 private class Rabbit {
     val x = IntArray(8)
     val c = IntArray(8)
