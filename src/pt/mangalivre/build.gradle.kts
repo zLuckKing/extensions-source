@@ -16,3 +16,7 @@ keiyoushi {
         versionId = 2
     }
 }
+
+dependencies {
+    implementation("androidx.webkit:webkit:1.11.0")
+}
