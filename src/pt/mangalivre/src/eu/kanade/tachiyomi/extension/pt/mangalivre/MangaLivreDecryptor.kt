@@ -29,29 +29,27 @@ class MangaLivreDecryptor(
     )
 
     @Volatile private var lastReloadAt = 0L
-
     @Volatile private var lastReloadMatched: Boolean? = null
-
     @Volatile private var lastReloadError: String? = null
 
     private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
 
     /**
      * Descriptografa o corpo da resposta. Em caso de falha, tenta recarregar
-     * as constantes (se a última recarga não falhou) e repete a operação uma vez.
+     * as constantes (respeitando o cooldown) e repete a operação uma vez.
      */
     fun decrypt(cipherWrapperBody: String, dataKey: String): String? {
         val firstAttempt = decryptInternal(cipherWrapperBody, dataKey)
         if (firstAttempt != null) return firstAttempt
 
-        // Só recarrega se a última tentativa não falhou explicitamente
-        if (lastReloadMatched != false) {
-            Log.w("MangaLivreDecryptor", "Descriptografia falhou. Tentando recarregar constantes...")
+        // Só recarrega se o cooldown já expirou
+        if (System.currentTimeMillis() - lastReloadAt >= RELOAD_COOLDOWN_MS) {
+            Log.w("MangaLivreDecryptor", "Descriptografia falhou. Recarregando constantes...")
             reloadConstants()
             return decryptInternal(cipherWrapperBody, dataKey)
         }
 
-        Log.e("MangaLivreDecryptor", "Descriptografia falhou e recarga já falhou anteriormente.")
+        Log.e("MangaLivreDecryptor", "Descriptografia falhou e cooldown ativo (${(System.currentTimeMillis() - lastReloadAt) / 1000}s).")
         return null
     }
 
@@ -81,44 +79,51 @@ class MangaLivreDecryptor(
             if (indexJsUrl != null) {
                 val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
                 lastReloadMatched = false
-                var extracted: Constants? = null
-
-                // Tenta as três regex em ordem: específica → simples → genérica
-                val match1 = REGEX_ARRAY.find(js)
-                if (match1 != null) {
-                    extracted = Constants(match1.groupValues[1], match1.groupValues[2], match1.groupValues[3])
-                    lastReloadMatched = true
-                }
-
-                if (extracted == null) {
-                    val match2 = REGEX_SIMPLE.find(js)
-                    if (match2 != null) {
-                        extracted = Constants(match2.groupValues[1], "", match2.groupValues[2])
-                        lastReloadMatched = true
-                    }
-                }
-
-                if (extracted == null) {
-                    val match3 = REGEX_GENERIC.find(js)
-                    if (match3 != null) {
-                        extracted = Constants(match3.groupValues[1], "", match3.groupValues[2])
-                        lastReloadMatched = true
-                    }
-                }
+                val extracted = extractConstantsHeuristically(js)
 
                 if (extracted != null) {
                     constants = extracted
+                    lastReloadMatched = true
                     lastReloadError = null
-                    Log.d("MangaLivreDecryptor", "Constantes recarregadas: host=${constants.hostPart}, antibot=${constants.antibotPart}, encKey=${constants.encKey}")
+                    Log.d("MangaLivreDecryptor", "Constantes atualizadas heuristicamente: host=${extracted.hostPart}, antibot=${extracted.antibotPart}, encKey=${extracted.encKey}")
                 } else {
-                    lastReloadError = "no match in index.js"
-                    Log.e("MangaLivreDecryptor", "Nenhuma regex capturou as constantes.")
+                    lastReloadError = "no heuristic match found"
+                    Log.e("MangaLivreDecryptor", "Não foi possível extrair constantes do bundle atual.")
                 }
             } else {
                 lastReloadMatched = false
                 lastReloadError = "no script[src*=index] found on baseUrl page"
+                Log.e("MangaLivreDecryptor", "Não foi possível encontrar o script index.js na página.")
             }
         }.onFailure { lastReloadError = it.javaClass.simpleName + ": " + it.message }
+    }
+
+    /**
+     * Extrai do bundle todas as strings longas (>= 8 caracteres) e tenta identificar
+     * hostPart, antibotPart e encKey usando padrões típicos:
+     * - hostPart: contém "::" (ex.: toonlivre.net::w3)
+     * - antibotPart: formato "rX_YmZ_k" ou similar (curto, com underlines)
+     * - encKey: contém hifens e letras maiúsculas (ex.: Phantom-Tide-Harvest8)
+     */
+    private fun extractConstantsHeuristically(js: String): Constants? {
+        // Coleta todas as strings longas entre aspas (simples ou duplas)
+        val allStrings = Regex("""["']([^"']{8,})["']""").findAll(js).map { it.groupValues[1] }.toList()
+
+        // Procura hostPart: string que contém "::" (ex.: "toonlivre.net::w3")
+        val hostPart = allStrings.firstOrNull { it.contains("::") }
+            ?: return null
+
+        // Procura antibotPart: string curta (até 12 chars) com underlines e padrão "r*_*m*_k" ou similar
+        val antibotPart = allStrings.firstOrNull { s ->
+            s.length in 5..12 && s.contains("_") && s.matches(Regex("""[a-z]\d+_[a-z]+\d+_[a-z]?"""))
+        } ?: "" // antibot pode estar vazio em versões anteriores
+
+        // Procura encKey: string com hifens e letras maiúsculas (ex.: "Phantom-Tide-Harvest8")
+        val encKey = allStrings.firstOrNull { s ->
+            s.contains("-") && s.any { it.isUpperCase() } && s.length > 10
+        } ?: return null
+
+        return Constants(hostPart, antibotPart, encKey)
     }
 
     private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
@@ -164,29 +169,12 @@ class MangaLivreDecryptor(
     }
 
     companion object {
-        // Constantes atuais (atualizado 22/07/2026)
+        // Constantes atuais (atualizado 23/07/2026)
         private const val DEFAULT_HOST_PART = "toonlivre.net::w3"
         private const val DEFAULT_ANTIBOT_PART = "r7_5m2_k"
         private const val DEFAULT_ENC_KEY = "Phantom-Tide-Harvest8"
 
         private const val RELOAD_COOLDOWN_MS = 30_000L
-
-        // Regex específica para o formato array atual
-        private val REGEX_ARRAY = Regex(
-            """toISOString.*?\].*?join.*?"([^"]+)"\s*,\s*"([^"]+)"\s*\].*?return\s*"([^"]+)"\s*\+""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
-
-        // Regex para formato simples anterior
-        private val REGEX_SIMPLE = Regex(
-            """getUTCFullYear\(\)[^}]*?"([^"]{10,})"[^}]*?return "([^"]{5,})"\+""",
-        )
-
-        // Regex genérica: captura qualquer string longa depois da data e antes do return
-        private val REGEX_GENERIC = Regex(
-            """(?:toISOString|getUTCFullYear).*?"([^"]{10,})".*?return\s*"([^"]{5,})"""",
-            RegexOption.DOT_MATCHES_ALL,
-        )
     }
 }
 
