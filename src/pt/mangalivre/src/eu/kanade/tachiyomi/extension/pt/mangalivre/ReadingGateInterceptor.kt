@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 import android.util.Base64
 import android.util.Log
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -12,10 +11,8 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
 import org.json.JSONObject
 import java.io.IOException
-import java.security.MessageDigest
 
 class ReadingGateInterceptor(
     private val baseUrl: String,
@@ -31,6 +28,7 @@ class ReadingGateInterceptor(
     // Cache do token JWT
     @Volatile
     private var cachedToken: String? = null
+
     @Volatile
     private var tokenExpiration: Long = 0L
 
