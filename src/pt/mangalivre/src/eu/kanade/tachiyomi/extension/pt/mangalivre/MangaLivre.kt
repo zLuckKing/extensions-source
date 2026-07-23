@@ -11,6 +11,8 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import io.reactivex.rxjava3.core.Observable
+import io.reactivex.rxjava3.schedulers.Schedulers
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferencesLazy
@@ -32,10 +34,12 @@ abstract class MangaLivre :
 
     override val supportsLatest: Boolean = true
 
-    private val decryptor = MangaLivreDecryptor(baseUrl, network.client, headers)
+    // ALTERAÇÃO 1: Construtor do decryptor mudou (sem baseUrl, sem client)
+    private val decryptor by lazy { MangaLivreDecryptor(headers, debug = true) }
 
     override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(ReadingGateInterceptor(baseUrl, headers["User-Agent"], network.client, decryptor, headers))
+        // ALTERAÇÃO 2: Interceptor agora só tem 3 argumentos
+        .addInterceptor(ReadingGateInterceptor(baseUrl, headers["User-Agent"], network.client))
         .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
 
@@ -51,6 +55,8 @@ abstract class MangaLivre :
         .add("Sec-Fetch-Mode", "cors")
         .add("Sec-Fetch-Site", "same-origin")
 
+    // ============================== Popular =======================================
+
     private val popularFilter = FilterList(
         listOf(
             OrderByFilter(options = listOf("" to SORT_POPULAR)),
@@ -62,6 +68,8 @@ abstract class MangaLivre :
 
     override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
 
+    // ============================== Latest =======================================
+
     private val latestFilter = FilterList(
         listOf(
             OrderByFilter(options = listOf("" to SORT_UPDATED)),
@@ -72,6 +80,8 @@ abstract class MangaLivre :
     override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", latestFilter)
 
     override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
+
+    // ============================== Search =======================================
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$apiUrl/mangas/search".toHttpUrl().newBuilder()
@@ -102,28 +112,43 @@ abstract class MangaLivre :
         return MangasPage(mangas, dto.hasNextPage)
     }
 
+    // ============================== Details =======================================
+
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/${manga.url}"
 
     override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiUrl/manga-by-slug/${manga.url}", headers)
 
     override fun mangaDetailsParse(response: Response): SManga = response.parseJson<MangaDto>().toSManga(useAlternativeTitle)
 
+    // ============================== Chapters =======================================
+
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> = response.parseJson<MangaDto>().toSChapterList()
 
-    override fun pageListRequest(chapter: SChapter): Request {
-        val readerPath = chapter.url.substringBeforeLast("#")
-        val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
-        return GET("$apiUrl/mangas/${ref.mangaId}/chapters/${ref.chapterId}", headers)
-            .newBuilder()
-            .tag(ReadingGateInterceptor.ReaderPath::class.java, ReadingGateInterceptor.ReaderPath(readerPath))
-            .build()
+    // ============================== Pages (NOVO MÉTODO) =======================================
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        return Observable.fromCallable {
+            val readerPath = chapter.url.substringBeforeLast("#")
+            val chapterUrl = if (readerPath.startsWith("http")) {
+                readerPath
+            } else {
+                baseUrl + readerPath
+            }
+
+            val imageUrls = decryptor.fetchChapterPages(chapterUrl)
+                ?: throw IOException("Não foi possível obter as páginas do capítulo: $chapterUrl")
+
+            imageUrls.mapIndexed { index, url -> Page(index, imageUrl = url) }
+        }.subscribeOn(Schedulers.io())
     }
 
-    override fun pageListParse(response: Response): List<Page> = response.parseJson<PageDto>().toPageList()
+    // pageListRequest e pageListParse foram REMOVIDOS, não existem mais.
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+
+    // ============================== Filters =======================================
 
     override fun getFilterList(): FilterList = FilterList(
         listOf(
@@ -163,6 +188,8 @@ abstract class MangaLivre :
         }.also(screen::addPreference)
     }
 
+    // ============================== Utilities =======================================
+
     private inline fun <reified T> Response.parseJson(): T {
         val peek = peekBody(MAX_PEEK).string().trimStart()
         if (peek.isEmpty() || peek.startsWith("<")) {
@@ -186,4 +213,4 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-}
+    }
