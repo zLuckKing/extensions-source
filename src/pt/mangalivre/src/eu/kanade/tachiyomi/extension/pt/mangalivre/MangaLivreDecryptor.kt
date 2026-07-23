@@ -78,7 +78,9 @@ class MangaLivreDecryptor(
         }
 
         return try {
-            if (latch.await(30, TimeUnit.SECONDS)) resultRef.get() else {
+            if (latch.await(30, TimeUnit.SECONDS)) {
+                resultRef.get()
+            } else {
                 log("Timeout aguardando captura das páginas de $chapterUrl")
                 null
             }
@@ -113,8 +115,10 @@ class MangaLivreDecryptor(
             // da página rodar, se o dispositivo suportar a feature.
             val earlyInjectionOk = installEarlyHook(view)
             if (!earlyInjectionOk) {
-                log("AVISO: dispositivo sem suporte a DOCUMENT_START_SCRIPT - " +
-                    "hook será injetado em onPageStarted (menos garantido)")
+                log(
+                    "AVISO: dispositivo sem suporte a DOCUMENT_START_SCRIPT - " +
+                        "hook será injetado em onPageStarted (menos garantido)",
+                )
             }
 
             view.webViewClient = object : WebViewClient() {
