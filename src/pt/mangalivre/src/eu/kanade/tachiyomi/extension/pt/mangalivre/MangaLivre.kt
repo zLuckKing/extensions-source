@@ -11,8 +11,6 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import io.reactivex.rxjava3.core.Observable
-import io.reactivex.rxjava3.schedulers.Schedulers
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferencesLazy
@@ -44,6 +42,9 @@ abstract class MangaLivre :
     private val apiUrl: String = "$baseUrl/api"
 
     private val preferences by getPreferencesLazy()
+
+    // Armazena a URL do capítulo atual para uso em pageListParse
+    private var currentChapterUrl: String? = null
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Accept", "*/*")
@@ -116,19 +117,31 @@ abstract class MangaLivre :
 
     // ============================== Pages =======================================
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+    override fun pageListRequest(chapter: SChapter): Request {
+        // Armazena a URL do capítulo para o parser
         val readerPath = chapter.url.substringBeforeLast("#")
-        val chapterUrl = if (readerPath.startsWith("http")) {
+        currentChapterUrl = if (readerPath.startsWith("http")) {
             readerPath
         } else {
             baseUrl + readerPath
         }
+        val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
+        return GET("$apiUrl/mangas/${ref.mangaId}/chapters/${ref.chapterId}", headers)
+            .newBuilder()
+            .tag(ReadingGateInterceptor.ReaderPath::class.java, ReadingGateInterceptor.ReaderPath(readerPath))
+            .build()
+    }
+
+    override fun pageListParse(response: Response): List<Page> {
+        // Ignora a resposta da API e usa o decryptor diretamente
+        val chapterUrl = currentChapterUrl
+            ?: throw IOException("URL do capítulo não definida")
 
         val imageUrls = decryptor.fetchChapterPages(chapterUrl)
             ?: throw IOException("Não foi possível obter as páginas do capítulo: $chapterUrl")
 
-        imageUrls.mapIndexed { index, url -> Page(index, imageUrl = url) }
-    }.subscribeOn(Schedulers.io())
+        return imageUrls.mapIndexed { index, url -> Page(index, imageUrl = url) }
+    }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
