@@ -118,7 +118,6 @@ abstract class MangaLivre :
     // ============================== Pages =======================================
 
     override fun pageListRequest(chapter: SChapter): Request {
-        // Armazena a URL do capítulo para o parser
         val readerPath = chapter.url.substringBeforeLast("#")
         currentChapterUrl = if (readerPath.startsWith("http")) {
             readerPath
@@ -133,7 +132,6 @@ abstract class MangaLivre :
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        // Ignora a resposta da API e usa o decryptor diretamente
         val chapterUrl = currentChapterUrl
             ?: throw IOException("URL do capítulo não definida")
 
@@ -208,4 +206,4 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-}
+    }
