@@ -32,10 +32,24 @@ abstract class MangaLivre :
 
     override val supportsLatest: Boolean = true
 
-    private val decryptor by lazy { MangaLivreDecryptor(headers, debug = true) }
+    private val decryptor by lazy { MangaLivreDecryptor(headers, debug = false) }
 
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(ReadingGateInterceptor(baseUrl, headers["User-Agent"], network.client))
+        .addInterceptor { chain ->
+            val request = chain.request()
+            // Adiciona cookie e Referer apenas para o CDN de imagens
+            if (request.url.host.contains("toonlivre.net") && request.url.pathSegments.any { it.contains(".") }) {
+                val cookie = android.webkit.CookieManager.getInstance().getCookie(baseUrl) ?: ""
+                val newRequest = request.newBuilder()
+                    .header("Referer", "$baseUrl/")
+                    .header("Cookie", cookie)
+                    .build()
+                chain.proceed(newRequest)
+            } else {
+                chain.proceed(request)
+            }
+        }
         .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
 
@@ -206,4 +220,4 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-}
+    }
