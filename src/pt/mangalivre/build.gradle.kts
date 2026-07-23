@@ -19,4 +19,5 @@ keiyoushi {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("io.reactivex.rxjava3:rxjava:3.1.6")
 }
