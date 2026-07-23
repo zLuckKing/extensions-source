@@ -22,6 +22,9 @@ class ReadingGateInterceptor(
 
     private val baseUrlHost = baseUrl.toHttpUrl().host
 
+    // Força o uso do domínio correto para as chamadas de token
+    private val tokenBaseUrl = "https://toonlivre.net"
+
     @Volatile
     private var lastPrimeAttemptAt = 0L
 
@@ -80,7 +83,8 @@ class ReadingGateInterceptor(
         synchronized(this) {
             if (System.currentTimeMillis() - lastPrimeAttemptAt < REFRESH_COOLDOWN_MS) return
             lastPrimeAttemptAt = System.currentTimeMillis()
-            TokenResolver.prime(baseUrl, userAgent)
+            // Passa o tokenBaseUrl para o TokenResolver, garantindo o domínio correto
+            TokenResolver.prime(tokenBaseUrl, userAgent)
             if (getToonVCookie() == null) {
                 throw IOException(
                     "TokenResolver concluído, mas cookie 'toon_v' não foi encontrado no CookieManager.",
@@ -135,13 +139,13 @@ class ReadingGateInterceptor(
 
     private fun fetchTokenFromMeta(path: String): String? {
         return runCatching {
-            val pageUrl = baseUrl + path
+            val pageUrl = tokenBaseUrl + path
             val cookieValue = getToonVCookie()
             val pageHeaders = okhttp3.Headers.Builder().apply {
                 if (cookieValue != null) {
                     add("Cookie", "toon_v=$cookieValue")
                 }
-                add("Referer", "$baseUrl/${path.trimStart('/').substringBefore("/")}")
+                add("Referer", "$tokenBaseUrl/${path.trimStart('/').substringBefore("/")}")
             }.build()
 
             val request = GET(pageUrl, pageHeaders)
@@ -168,7 +172,7 @@ class ReadingGateInterceptor(
 
     private fun fetchTokenFromApi(): String? {
         return runCatching {
-            val apiUrl = "$baseUrl/api/seed"
+            val apiUrl = "$tokenBaseUrl/api/seed"
             val request = GET(apiUrl, okhttp3.Headers.Builder().build())
             val response = cookieClient.newCall(request).execute()
             val json = response.parseAs<JsonObject>()
