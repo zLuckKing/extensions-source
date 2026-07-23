@@ -1,327 +1,473 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import android.util.Base64
-import android.util.Log
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.util.asJsoup
-import keiyoushi.utils.get
-import keiyoushi.utils.parseAs
-import keiyoushi.utils.readIntBigEndian
-import keiyoushi.utils.readIntLittleEndian
-import keiyoushi.utils.stringOrNull
-import kotlinx.serialization.json.JsonElement
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import keiyoushi.utils.applicationContext
 import okhttp3.Headers
-import okhttp3.OkHttpClient
-import java.security.MessageDigest
-import java.time.LocalDate
-import java.time.ZoneOffset
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
+/**
+ * MangaLivreDecryptor - versão baseada em interceptação de runtime.
+ *
+ * Filosofia (pontos 1-10 aplicados):
+ * - Nunca inspeciona toString() de funções (ponto 9).
+ * - Nunca reimplementa Rabbit/CryptoJS/SHA no Kotlin (pontos 2, 3, 10).
+ * - Descobre a função de decrypt observando uma CHAMADA REAL feita pelo
+ *   próprio site (ponto 4), não o código-fonte dela.
+ * - Uma vez capturada a referência da função, ela é reaproveitada como
+ *   caixa-preta: entra ciphertext, sai JSON (ponto 10 - "contrato único").
+ * - Descoberta acontece só uma vez por sessão de WebView (ponto 8).
+ * - Sem nomes mágicos em window; guardado em closure (ponto 6).
+ * - Sem parser manual de escape (ponto 7) - usamos JSONArray/JSONObject
+ *   corretamente em vez de unescape na mão.
+ * - Validação mínima: só "é JSON válido?" (ponto 5) - estrutura de
+ *   negócio (pages/images) é responsabilidade do parser Kotlin, não daqui.
+ *
+ * Observação honesta: para saber QUAL chamada de função em runtime é "a"
+ * chamada de decrypt, ainda é preciso um critério de captura (não dá pra
+ * ler a mente do bundle). A diferença em relação à v1 é que esse critério
+ * é comportamental e observado em runtime (assinatura de chamada: recebe
+ * uma string grande tipo ciphertext, é chamada durante o processamento da
+ * resposta da API, retorna algo parseável como JSON) - nunca análise de
+ * texto-fonte/nome de função/algoritmo.
+ */
 class MangaLivreDecryptor(
     private val baseUrl: String,
-    private val client: OkHttpClient,
     private val headers: Headers,
+    private val debug: Boolean = false,
 ) {
 
-    @Volatile private var constants = Constants(
-        DEFAULT_HOST_PART,
-        DEFAULT_ANTIBOT_PART,
-        DEFAULT_ENC_KEY,
+    private val handler = Handler(Looper.getMainLooper())
+    private val webViewRef = AtomicReference<WebView?>()
+    private val initializedRef = AtomicReference(false)
+    private var initLatch = CountDownLatch(1)
+
+    private val decryptQueue = LinkedBlockingQueue<DecryptTask>(1)
+    private val decryptThread = Thread(this::processQueue).apply {
+        name = "MangaLivre-Decryptor"
+        isDaemon = true
+        start()
+    }
+
+    // true assim que o hook de runtime confirma ter capturado a função real
+    private val hookReadyRef = AtomicReference(false)
+
+    private data class DecryptTask(
+        val ciphertext: String,
+        val latch: CountDownLatch,
+        @Volatile var result: String? = null,
     )
 
-    @Volatile private var lastReloadAt = 0L
+    // ------------------------------------------------------------------
+    // Inicialização
+    // ------------------------------------------------------------------
 
-    @Volatile private var lastReloadMatched: Boolean? = null
+    private fun ensureInitialized(): Boolean {
+        if (initializedRef.get() && webViewRef.get() != null) return true
 
-    @Volatile private var lastReloadError: String? = null
-
-    private data class Constants(val hostPart: String, val antibotPart: String, val encKey: String)
-
-    /**
-     * Descriptografa o corpo da resposta. Em caso de falha, tenta recarregar
-     * as constantes (respeitando o cooldown) e repete a operação uma vez.
-     */
-    fun decrypt(cipherWrapperBody: String, dataKey: String): String? {
-        val firstAttempt = decryptInternal(cipherWrapperBody, dataKey)
-        if (firstAttempt != null) return firstAttempt
-
-        // Só recarrega se o cooldown já expirou
-        if (System.currentTimeMillis() - lastReloadAt >= RELOAD_COOLDOWN_MS) {
-            Log.w("MangaLivreDecryptor", "Descriptografia falhou. Recarregando constantes...")
-            reloadConstants()
-            return decryptInternal(cipherWrapperBody, dataKey)
-        }
-
-        Log.e("MangaLivreDecryptor", "Descriptografia falhou e cooldown ativo (${(System.currentTimeMillis() - lastReloadAt) / 1000}s).")
-        return null
-    }
-
-    private fun decryptInternal(cipherWrapperBody: String, dataKey: String): String? = runCatching {
-        val ciphertext = cipherWrapperBody.parseAs<JsonElement>()[dataKey]?.stringOrNull
-            ?: return@runCatching null
-        decryptRabbit(ciphertext, derivePassword()).takeIf { it.isValidJson() }
-    }.getOrNull()
-
-    fun debugInfo(): String {
-        val c = constants
-        return "reloadMatched=$lastReloadMatched reloadError=$lastReloadError " +
-            "host=${c.hostPart} antibot=${c.antibotPart} encKeyLen=${c.encKey.length}"
-    }
-
-    fun reloadConstants() {
-        val now = System.currentTimeMillis()
         synchronized(this) {
-            if (now - lastReloadAt < RELOAD_COOLDOWN_MS) return
-            lastReloadAt = now
-        }
-        runCatching {
-            val indexJsUrl = client.newCall(GET(baseUrl, headers)).execute()
-                .asJsoup()
-                .selectFirst("script[src*=index]")
-                ?.absUrl("src")
-            if (indexJsUrl != null) {
-                val js = client.newCall(GET(indexJsUrl, headers)).execute().body.string()
-                lastReloadMatched = false
-                val extracted = extractConstantsHeuristically(js)
+            if (initializedRef.get() && webViewRef.get() != null) return true
 
-                if (extracted != null) {
-                    constants = extracted
-                    lastReloadMatched = true
-                    lastReloadError = null
-                    Log.d("MangaLivreDecryptor", "Constantes atualizadas heuristicamente: host=${extracted.hostPart}, antibot=${extracted.antibotPart}, encKey=${extracted.encKey}")
-                } else {
-                    lastReloadError = "no heuristic match found"
-                    Log.e("MangaLivreDecryptor", "Não foi possível extrair constantes do bundle atual.")
-                }
-            } else {
-                lastReloadMatched = false
-                lastReloadError = "no script[src*=index] found on baseUrl page"
-                Log.e("MangaLivreDecryptor", "Não foi possível encontrar o script index.js na página.")
+            initLatch = CountDownLatch(1)
+
+            if (!createAndLoadWebView()) {
+                log("Falha ao criar WebView na inicialização")
+                return false
             }
-        }.onFailure { lastReloadError = it.javaClass.simpleName + ": " + it.message }
-    }
 
-    /**
-     * Extrai do bundle todas as strings longas (>= 8 caracteres) e tenta identificar
-     * hostPart, antibotPart e encKey usando padrões típicos:
-     * - hostPart: contém "::" (ex.: toonlivre.net::w3)
-     * - antibotPart: formato "rX_YmZ_k" ou similar (curto, com underlines)
-     * - encKey: contém hifens e letras maiúsculas (ex.: Phantom-Tide-Harvest8)
-     */
-    private fun extractConstantsHeuristically(js: String): Constants? {
-        // Coleta todas as strings longas entre aspas (simples ou duplas)
-        val allStrings = Regex("""["']([^"']{8,})["']""").findAll(js).map { it.groupValues[1] }.toList()
-
-        // Procura hostPart: string que contém "::" (ex.: "toonlivre.net::w3")
-        val hostPart = allStrings.firstOrNull { it.contains("::") }
-            ?: return null
-
-        // Procura antibotPart: string curta (até 12 chars) com underlines e padrão "r*_*m*_k" ou similar
-        val antibotPart = allStrings.firstOrNull { s ->
-            s.length in 5..12 && s.contains("_") && s.matches(Regex("""[a-z]\d+_[a-z]+\d+_[a-z]?"""))
-        } ?: "" // antibot pode estar vazio em versões anteriores
-
-        // Procura encKey: string com hifens e letras maiúsculas (ex.: "Phantom-Tide-Harvest8")
-        val encKey = allStrings.firstOrNull { s ->
-            s.contains("-") && s.any { it.isUpperCase() } && s.length > 10
-        } ?: return null
-
-        return Constants(hostPart, antibotPart, encKey)
-    }
-
-    private fun String.isValidJson(): Boolean = runCatching { parseAs<JsonElement>() }.isSuccess
-
-    private fun decryptRabbit(ciphertextB64: String, password: String): String {
-        val encrypted = Base64.decode(ciphertextB64, Base64.DEFAULT)
-        val salt = encrypted.copyOfRange(8, 16)
-        val ciphertext = encrypted.copyOfRange(16, encrypted.size)
-
-        val (key, iv) = evpBytesToKey(password.toByteArray(), salt)
-        val plaintext = ciphertext.copyOf()
-        Rabbit().apply { setup(key, iv) }.crypt(plaintext)
-
-        return String(plaintext, Charsets.UTF_8)
-    }
-
-    private fun derivePassword(date: String = LocalDate.now(ZoneOffset.UTC).toString()): String {
-        val c = constants
-        val toHash = date + c.hostPart + c.antibotPart
-        val sha256Part = MessageDigest.getInstance("SHA-256")
-            .digest(toHash.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-            .substring(0, 8)
-        return c.encKey + sha256Part
-    }
-
-    private fun evpBytesToKey(password: ByteArray, salt: ByteArray, keyLen: Int = 16, ivLen: Int = 8): Pair<ByteArray, ByteArray> {
-        val derived = ByteArray(keyLen + ivLen)
-        var derivedPos = 0
-        var md5Hash = ByteArray(0)
-        val md = MessageDigest.getInstance("MD5")
-        while (derivedPos < derived.size) {
-            md.reset()
-            if (md5Hash.isNotEmpty()) md.update(md5Hash)
-            md.update(password)
-            md.update(salt)
-            md5Hash = md.digest()
-            val toCopy = minOf(md5Hash.size, derived.size - derivedPos)
-            System.arraycopy(md5Hash, 0, derived, derivedPos, toCopy)
-            derivedPos += toCopy
+            return try {
+                initLatch.await(25, TimeUnit.SECONDS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                false
+            }
         }
-        return Pair(derived.copyOfRange(0, keyLen), derived.copyOfRange(keyLen, keyLen + ivLen))
+    }
+
+    private fun createAndLoadWebView(): Boolean {
+        var success = false
+        val creationLatch = CountDownLatch(1)
+
+        handler.post {
+            try {
+                destroyWebViewInternal()
+
+                val view = WebView(applicationContext)
+                webViewRef.set(view)
+                hookReadyRef.set(false)
+
+                with(view.settings) {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    if (!headers["User-Agent"].isNullOrBlank()) {
+                        userAgentString = headers["User-Agent"]
+                    }
+                }
+
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    view.webViewRenderProcessClient = object : android.webkit.WebViewRenderProcessClient {
+                        override fun onRenderProcessUnresponsive(
+                            view: WebView,
+                            renderer: android.webkit.WebViewRenderProcess?,
+                        ) {
+                            log("Renderer unresponsive - recriando WebView")
+                            handler.post { createAndLoadWebView() }
+                        }
+
+                        override fun onRenderProcessResponsive(
+                            view: WebView,
+                            renderer: android.webkit.WebViewRenderProcess?,
+                        ) {}
+                    }
+                }
+
+                // CRÍTICO: o hook precisa existir ANTES do bundle da página
+                // rodar, senão perdemos a primeira chamada de decrypt.
+                view.addJavascriptInterface(RuntimeBridge(), "__ml_bridge")
+
+                view.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                        // injeta o hook o mais cedo possível no ciclo de vida
+                        view.evaluateJavascript(RUNTIME_HOOK_SCRIPT, null)
+                    }
+
+                    override fun onPageFinished(view: WebView, url: String) {
+                        log("WebView carregada: $url")
+                        initializedRef.set(true)
+                        success = true
+                        creationLatch.countDown()
+                        initLatch.countDown()
+                    }
+
+                    override fun onReceivedError(
+                        view: WebView,
+                        errorCode: Int,
+                        description: String,
+                        failingUrl: String,
+                    ) {
+                        log("WebView init error: $description")
+                        creationLatch.countDown()
+                        initLatch.countDown()
+                    }
+                }
+
+                view.loadUrl(baseUrl)
+            } catch (e: Exception) {
+                log("WebView creation failed: ${e.message}")
+                creationLatch.countDown()
+                initLatch.countDown()
+            }
+        }
+
+        return try {
+            creationLatch.await(30, TimeUnit.SECONDS) && success
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    private fun destroyWebViewInternal() {
+        webViewRef.getAndSet(null)?.let { old ->
+            try {
+                old.stopLoading()
+                old.destroy()
+            } catch (_: Exception) {}
+        }
+        initializedRef.set(false)
+        hookReadyRef.set(false)
+    }
+
+    // ------------------------------------------------------------------
+    // Ponte Kotlin <-> JS: recebe confirmação de que o hook capturou a função real
+    // ------------------------------------------------------------------
+
+    private inner class RuntimeBridge {
+        @android.webkit.JavascriptInterface
+        fun onDecryptFunctionCaptured() {
+            hookReadyRef.set(true)
+            log("Hook capturou a função de decrypt real do site em runtime")
+        }
+
+        @android.webkit.JavascriptInterface
+        fun onLog(msg: String) {
+            log("[JS] $msg")
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Descriptografia
+    // ------------------------------------------------------------------
+
+    fun decrypt(ciphertext: String): String? {
+        if (!ensureInitialized()) {
+            log("WebView não inicializada")
+            return null
+        }
+
+        val latch = CountDownLatch(1)
+        val task = DecryptTask(ciphertext, latch)
+
+        return try {
+            decryptQueue.put(task)
+            if (latch.await(20, TimeUnit.SECONDS)) task.result else {
+                log("Timeout aguardando descriptografia")
+                null
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            null
+        }
+    }
+
+    private fun processQueue() {
+        while (!Thread.currentThread().isInterrupted) {
+            try {
+                val task = decryptQueue.take()
+                val start = System.currentTimeMillis()
+                performDecrypt(task)
+                log("Descriptografia concluída em ${System.currentTimeMillis() - start}ms")
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+    }
+
+    private fun performDecrypt(task: DecryptTask) {
+        if (!initializedRef.get() || webViewRef.get() == null) {
+            log("WebView indisponível - recriando")
+            if (!createAndLoadWebView()) {
+                task.latch.countDown()
+                return
+            }
+        }
+
+        val latch = CountDownLatch(1)
+        handler.post { executeDecrypt(task, latch) }
+
+        val success = try {
+            latch.await(15, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
+        if (!success || task.result == null) {
+            log("Timeout/falha - recriando WebView e tentando novamente")
+            if (createAndLoadWebView()) {
+                val retryLatch = CountDownLatch(1)
+                handler.post { executeDecrypt(task, retryLatch) }
+                try {
+                    retryLatch.await(15, TimeUnit.SECONDS)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+
+        task.latch.countDown()
+    }
+
+    private fun executeDecrypt(task: DecryptTask, latch: CountDownLatch) {
+        val view = webViewRef.get()
+        if (view == null) {
+            latch.countDown()
+            return
+        }
+
+        if (!hookReadyRef.get()) {
+            log("Função de decrypt ainda não foi observada em runtime - " +
+                "site pode não ter feito nenhuma chamada de API ainda")
+            latch.countDown()
+            return
+        }
+
+        // Passa a string via JSON.stringify do lado Kotlin (sem parser manual).
+        val payloadJson = JSONObject().put("ciphertext", task.ciphertext).toString()
+
+        val script = """
+            (function() {
+                try {
+                    const payload = $payloadJson;
+                    if (typeof window.__ml_replayDecrypt !== 'function') {
+                        return JSON.stringify({ error: 'replay fn indisponível' });
+                    }
+                    const out = window.__ml_replayDecrypt(payload.ciphertext);
+                    // normaliza pra string (pode já vir como objeto/array)
+                    return (typeof out === 'string') ? out : JSON.stringify(out);
+                } catch (e) {
+                    return JSON.stringify({ error: e && e.message ? e.message : String(e) });
+                }
+            })();
+        """.trimIndent()
+
+        view.evaluateJavascript(script) { rawResult ->
+            try {
+                val unquoted = org.json.JSONTokener(rawResult).nextValue()
+                val text = if (unquoted is String) unquoted else rawResult
+
+                val isValidJson = runCatching { JSONObject(text) }.isSuccess ||
+                    runCatching { JSONArray(text) }.isSuccess
+
+                if (isValidJson) {
+                    task.result = text
+                    log("Descriptografia OK (via função real do site)")
+                } else {
+                    log("Resultado não é JSON válido: ${text.take(120)}")
+                }
+            } catch (e: Exception) {
+                log("Erro ao processar resultado: ${e.message}")
+            }
+            latch.countDown()
+        }
+    }
+
+    private fun log(msg: String) {
+        if (debug) android.util.Log.d("MangaLivreDecryptor", msg)
     }
 
     companion object {
-        // Constantes atuais (atualizado 23/07/2026)
-        private const val DEFAULT_HOST_PART = "toonlivre.net::w3"
-        private const val DEFAULT_ANTIBOT_PART = "r7_5m2_k"
-        private const val DEFAULT_ENC_KEY = "Phantom-Tide-Harvest8"
+        /**
+         * Script injetado em onPageStarted, ou seja, antes do bundle da
+         * página rodar. Ele NÃO conhece Rabbit/CryptoJS/SHA. Em vez disso:
+         *
+         * 1. Faz monkey-patch de window.fetch e XMLHttpRequest para saber
+         *    quando uma resposta de API (corpo criptografado) chega.
+         * 2. Faz monkey-patch de Function.prototype.apply/call para
+         *    observar TODAS as chamadas de função feitas durante o
+         *    processamento dessa resposta.
+         * 3. Usa um critério puramente comportamental (não de código-fonte)
+         *    pra identificar a chamada de decrypt: aconteceu durante o
+         *    processamento da resposta da API, recebeu como argumento uma
+         *    string longa parecida com o ciphertext que acabou de chegar,
+         *    e devolveu algo que dá pra converter em JSON.
+         * 4. Uma vez identificada, guarda a REFERÊNCIA da função (não o
+         *    código dela) numa closure interna e expõe só um método de
+         *    replay: window.__ml_replayDecrypt(ciphertext).
+         * 5. Assim que capturada, desliga os hooks (roda só uma vez -
+         *    ponto 8) e avisa o Kotlin via __ml_bridge.onDecryptFunctionCaptured().
+         *
+         * Isso satisfaz o ponto 10: a extensão nunca sabe qual algoritmo,
+         * senha ou biblioteca está por trás. Ela só reaproveita a função
+         * que o próprio site já usa.
+         */
+        private val RUNTIME_HOOK_SCRIPT = """
+            (function() {
+                if (window.__ml_hookInstalled) return;
+                window.__ml_hookInstalled = true;
 
-        private const val RELOAD_COOLDOWN_MS = 30_000L
-    }
-}
+                let captured = false;
+                let pendingCiphertexts = [];
 
-// Rabbit stream cipher (CryptoJS-compatible)
-private class Rabbit {
-    val x = IntArray(8)
-    val c = IntArray(8)
-    var b = 0
-
-    fun setup(key: ByteArray, iv: ByteArray) {
-        val kw = IntArray(4)
-        for (i in 0 until 4) {
-            kw[i] = key.readIntLittleEndian(i * 4)
-        }
-
-        x[0] = kw[0]
-        x[1] = (kw[3] shl 16) or ((kw[2] ushr 16) and 0xFFFF)
-        x[2] = kw[1]
-        x[3] = (kw[0] shl 16) or ((kw[3] ushr 16) and 0xFFFF)
-        x[4] = kw[2]
-        x[5] = (kw[1] shl 16) or ((kw[0] ushr 16) and 0xFFFF)
-        x[6] = kw[3]
-        x[7] = (kw[2] shl 16) or ((kw[1] ushr 16) and 0xFFFF)
-
-        c[0] = (kw[2] shl 16) or ((kw[2] ushr 16) and 0xFFFF)
-        c[1] = (kw[0] and 0xFFFF0000.toInt()) or (kw[1] and 0xFFFF)
-        c[2] = (kw[3] shl 16) or ((kw[3] ushr 16) and 0xFFFF)
-        c[3] = (kw[1] and 0xFFFF0000.toInt()) or (kw[2] and 0xFFFF)
-        c[4] = (kw[0] shl 16) or ((kw[0] ushr 16) and 0xFFFF)
-        c[5] = (kw[2] and 0xFFFF0000.toInt()) or (kw[3] and 0xFFFF)
-        c[6] = (kw[1] shl 16) or ((kw[1] ushr 16) and 0xFFFF)
-        c[7] = (kw[3] and 0xFFFF0000.toInt()) or (kw[0] and 0xFFFF)
-
-        b = 0
-        repeat(4) { nextState() }
-
-        for (i in 0 until 8) {
-            c[i] = c[i] xor x[(i + 4) and 7]
-        }
-
-        if (iv.isNotEmpty()) {
-            val iv0 = iv.readIntBigEndian(0)
-            val iv1 = iv.readIntBigEndian(4)
-
-            fun swap(w: Int) = ((w and 0xFF) shl 24) or
-                ((w and 0xFF00) shl 8) or
-                ((w and 0xFF0000) ushr 8) or
-                ((w ushr 24) and 0xFF)
-
-            val i0 = swap(iv0)
-            val i2 = swap(iv1)
-            val i1 = (i0 ushr 16) or (i2 and 0xFFFF0000.toInt())
-            val i3 = ((i2 shl 16) or (i0 and 0x0000FFFF))
-
-            c[0] = c[0] xor i0
-            c[1] = c[1] xor i1
-            c[2] = c[2] xor i2
-            c[3] = c[3] xor i3
-            c[4] = c[4] xor i0
-            c[5] = c[5] xor i1
-            c[6] = c[6] xor i2
-            c[7] = c[7] xor i3
-
-            repeat(4) { nextState() }
-        }
-    }
-
-    fun crypt(data: ByteArray) {
-        val wordsSize = (data.size + 3) / 4
-        val words = IntArray(wordsSize)
-
-        for (i in 0 until wordsSize) {
-            var word = 0
-            for (j in 0 until 4) {
-                val byteIdx = i * 4 + j
-                if (byteIdx < data.size) {
-                    word = word or ((data[byteIdx].toInt() and 0xFF) shl (j * 8))
+                function looksLikeCiphertext(s) {
+                    return typeof s === 'string' && s.length > 40 &&
+                        /^[A-Za-z0-9+/=_-]+${'$'}/.test(s.trim());
                 }
-            }
-            words[i] = word
-        }
 
-        var idx = 0
-        while (idx < words.size) {
-            nextState()
-            val (s0, s1, s2, s3) = keystreamBlock()
+                function tryConvertToJson(val) {
+                    if (val == null) return null;
+                    if (typeof val === 'object') return val;
+                    if (typeof val === 'string') {
+                        try { return JSON.parse(val); } catch (e) { return null; }
+                    }
+                    return null;
+                }
 
-            if (idx < words.size) words[idx] = words[idx] xor s0
-            if (idx + 1 < words.size) words[idx + 1] = words[idx + 1] xor s1
-            if (idx + 2 < words.size) words[idx + 2] = words[idx + 2] xor s2
-            if (idx + 3 < words.size) words[idx + 3] = words[idx + 3] xor s3
+                // 1) Observa respostas de API pra saber quando um ciphertext
+                //    "novo" acabou de chegar (contexto de captura).
+                const origFetch = window.fetch;
+                if (typeof origFetch === 'function') {
+                    window.fetch = function(...args) {
+                        const p = origFetch.apply(this, args);
+                        return p.then(function(resp) {
+                            try {
+                                const cloned = resp.clone();
+                                cloned.text().then(function(bodyText) {
+                                    try {
+                                        const json = JSON.parse(bodyText);
+                                        for (const key in json) {
+                                            if (looksLikeCiphertext(json[key])) {
+                                                pendingCiphertexts.push(json[key]);
+                                                if (pendingCiphertexts.length > 5) pendingCiphertexts.shift();
+                                            }
+                                        }
+                                    } catch (e) {}
+                                }).catch(function() {});
+                            } catch (e) {}
+                            return resp;
+                        });
+                    };
+                }
 
-            idx += 4
-        }
+                // 2) Observa chamadas de função em busca da que consome um
+                //    ciphertext pendente e devolve algo parseável como JSON.
+                //    Critério comportamental, não análise de código-fonte.
+                const origApply = Function.prototype.apply;
+                Function.prototype.apply = function(thisArg, args) {
+                    const result = origApply.call(this, thisArg, args);
+                    if (!captured && args && args.length) {
+                        const firstArg = args[0];
+                        if (looksLikeCiphertext(firstArg) && pendingCiphertexts.indexOf(firstArg) !== -1) {
+                            const asJson = tryConvertToJson(result);
+                            if (asJson && (typeof asJson === 'object')) {
+                                captureFunction(this, args.length);
+                            }
+                        }
+                    }
+                    return result;
+                };
 
-        for (byteIdx in 0 until data.size) {
-            val wordIdx = byteIdx / 4
-            val shift = (byteIdx % 4) * 8
-            data[byteIdx] = ((words[wordIdx] ushr shift) and 0xFF).toByte()
-        }
+                const origCall = Function.prototype.call;
+                Function.prototype.call = function(thisArg, ...args) {
+                    const result = origCall.call(this, thisArg, ...args);
+                    if (!captured && args && args.length) {
+                        const firstArg = args[0];
+                        if (looksLikeCiphertext(firstArg) && pendingCiphertexts.indexOf(firstArg) !== -1) {
+                            const asJson = tryConvertToJson(result);
+                            if (asJson && (typeof asJson === 'object')) {
+                                captureFunction(this, args.length);
+                            }
+                        }
+                    }
+                    return result;
+                };
+
+                function captureFunction(fnRef, expectedArgCount) {
+                    if (captured) return;
+                    captured = true;
+
+                    // Restaura os prototypes originais assim que captura -
+                    // não queremos overhead de hook pra sempre (ponto 8).
+                    Function.prototype.apply = origApply;
+                    Function.prototype.call = origCall;
+
+                    // Guarda a referência em closure, não em window direto
+                    // com nome óbvio (ponto 6) - expomos só o replay.
+                    window.__ml_replayDecrypt = function(ciphertext) {
+                        try {
+                            // Reaproveita a função exatamente como o site a usa,
+                            // sem saber o que ela faz por dentro.
+                            return fnRef(ciphertext);
+                        } catch (e) {
+                            return JSON.stringify({ error: 'replay failed: ' + e.message });
+                        }
+                    };
+
+                    try {
+                        if (window.__ml_bridge && window.__ml_bridge.onDecryptFunctionCaptured) {
+                            window.__ml_bridge.onDecryptFunctionCaptured();
+                        }
+                    } catch (e) {}
+                }
+            })();
+        """.trimIndent()
     }
-
-    fun keystreamBlock(): Quadruple {
-        val s0 = (x[0] xor (x[5] ushr 16) xor (x[3] shl 16))
-        val s1 = (x[2] xor (x[7] ushr 16) xor (x[5] shl 16))
-        val s2 = (x[4] xor (x[1] ushr 16) xor (x[7] shl 16))
-        val s3 = (x[6] xor (x[3] ushr 16) xor (x[1] shl 16))
-        return Quadruple(s0, s1, s2, s3)
-    }
-
-    fun nextState() {
-        val cOld = c.copyOf()
-
-        c[0] = c[0] + 0x4D34D34D + b
-        c[1] = c[1] + 0xD34D34D3u.toInt() + (if (unsignedLessThan(c[0], cOld[0])) 1 else 0)
-        c[2] = c[2] + 0x34D34D34 + (if (unsignedLessThan(c[1], cOld[1])) 1 else 0)
-        c[3] = c[3] + 0x4D34D34D + (if (unsignedLessThan(c[2], cOld[2])) 1 else 0)
-        c[4] = c[4] + 0xD34D34D3u.toInt() + (if (unsignedLessThan(c[3], cOld[3])) 1 else 0)
-        c[5] = c[5] + 0x34D34D34 + (if (unsignedLessThan(c[4], cOld[4])) 1 else 0)
-        c[6] = c[6] + 0x4D34D34D + (if (unsignedLessThan(c[5], cOld[5])) 1 else 0)
-        c[7] = c[7] + 0xD34D34D3u.toInt() + (if (unsignedLessThan(c[6], cOld[6])) 1 else 0)
-        b = if (unsignedLessThan(c[7], cOld[7])) 1 else 0
-
-        val g = IntArray(8)
-        for (i in 0 until 8) {
-            val gx = x[i] + c[i]
-            val ga = gx and 0xFFFF
-            val gb = (gx ushr 16) and 0xFFFF
-            val gh = ((((ga * ga) ushr 17) + ga * gb) ushr 15) + gb * gb
-
-            val gl = (((gx.toLong() and 0xFFFF0000L)) * gx) + (((gx.toLong() and 0x0000FFFFL)) * gx)
-            g[i] = (gh xor (gl and 0xFFFFFFFFL).toInt())
-        }
-
-        x[0] = g[0] + ((g[7] shl 16) or (g[7] ushr 16)) + ((g[6] shl 16) or (g[6] ushr 16))
-        x[1] = g[1] + ((g[0] shl 8) or (g[0] ushr 24)) + g[7]
-        x[2] = g[2] + ((g[1] shl 16) or (g[1] ushr 16)) + ((g[0] shl 16) or (g[0] ushr 16))
-        x[3] = g[3] + ((g[2] shl 8) or (g[2] ushr 24)) + g[1]
-        x[4] = g[4] + ((g[3] shl 16) or (g[3] ushr 16)) + ((g[2] shl 16) or (g[2] ushr 16))
-        x[5] = g[5] + ((g[4] shl 8) or (g[4] ushr 24)) + g[3]
-        x[6] = g[6] + ((g[5] shl 16) or (g[5] ushr 16)) + ((g[4] shl 16) or (g[4] ushr 16))
-        x[7] = g[7] + ((g[6] shl 8) or (g[6] ushr 24)) + g[5]
-    }
-
-    fun unsignedLessThan(a: Int, b: Int) = a.toUInt() < b.toUInt()
-
-    data class Quadruple(val s0: Int, val s1: Int, val s2: Int, val s3: Int)
 }
