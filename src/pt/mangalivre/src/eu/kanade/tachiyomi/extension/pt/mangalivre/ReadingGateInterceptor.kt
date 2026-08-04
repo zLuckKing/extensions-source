@@ -4,7 +4,7 @@ import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.Serializable
-import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -17,18 +17,33 @@ import java.io.IOException
  * Chapter contents are only served to visitors that carry a proof of work cookie and a
  * short lived token tied to the chapter being requested.
  *
+ * The proof of work cookie is entirely synthetic, computed locally and never actually issued
+ * by the server, so it's kept off the app's shared cookie store on purpose: that store is
+ * backed by `android.webkit.CookieManager`, the same one the WebView reader uses. Writing to
+ * it here would leave the WebView with cookies a real browser never produced, which is
+ * exactly the kind of mismatched state that makes Cloudflare Turnstile refuse the visitor
+ * when the reader later falls back to the WebView. Everything this interceptor needs is
+ * instead attached by hand, per request, through a private client that never touches that
+ * shared store.
+ *
  * The site rotates the values feeding the proof of work, so whenever it stops accepting ours
  * they are read again from the site script instead of waiting for a new release.
  */
 class ReadingGateInterceptor(
     private val baseUrl: String,
-    private val client: OkHttpClient,
+    private val appClient: OkHttpClient,
 ) : Interceptor {
 
     private val homeUrl = baseUrl.toHttpUrl()
 
+    /** Same client, minus the shared cookie jar the WebView reader also relies on. */
+    private val client = appClient.newBuilder()
+        .cookieJar(CookieJar.NO_COOKIES)
+        .build()
+
     private var parameters = PowParameters.DEFAULT
-    private var cookieExpiresAt = 0L
+    private var visitorCookie: String? = null
+    private var visitorCookieExpiresAt = 0L
     private var cachedToken: CachedToken? = null
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -44,7 +59,12 @@ class ReadingGateInterceptor(
         val token = routeToken(chapterKey, request.headers)
             ?: throw IOException(BLOCKED_MESSAGE)
 
-        return chain.proceed(request.newBuilder().header(ROUTE_TOKEN, token).build())
+        val gatedRequest = request.newBuilder()
+            .header(ROUTE_TOKEN, token)
+            .header("Cookie", cookieHeaderFor(request.url, request.headers))
+            .build()
+
+        return chain.proceed(gatedRequest)
     }
 
     /** Matches `/api/mangas/{mangaId}/chapters/{chapterId}`, the only gated endpoint. */
@@ -74,9 +94,11 @@ class ReadingGateInterceptor(
 
     @Synchronized
     private fun requestToken(key: String, headers: Headers): String? {
-        saveVisitorCookie()
+        val tokenRequest = GET("$baseUrl/api/chapter-token/$key", headers).newBuilder()
+            .header("Cookie", cookieHeaderFor(homeUrl, headers))
+            .build()
 
-        val dto = client.newCall(GET("$baseUrl/api/chapter-token/$key", headers)).execute()
+        val dto = client.newCall(tokenRequest).execute()
             .use { if (it.isSuccessful) it.parseAs<TokenDto>() else null }
             ?: return null
 
@@ -97,30 +119,40 @@ class ReadingGateInterceptor(
             .use { it.body.string() }
 
         parameters = PowParameters.parse(script)
-        cookieExpiresAt = 0L
+        visitorCookie = null
+        visitorCookieExpiresAt = 0L
     }
 
     /**
-     * Saved through the cookie jar so that cookies set by the site, such as the ones from
-     * the DDoS protection, are preserved.
+     * Builds the `Cookie` header by hand instead of letting OkHttp's cookie jar attach it:
+     * merges whatever the app already holds for this host (e.g. a `cf_clearance` obtained
+     * through a prior WebView solve) with our own proof-of-work cookie, without ever saving
+     * the latter back into the shared store.
      */
-    private fun saveVisitorCookie() {
+    private fun cookieHeaderFor(url: HttpUrl, requestHeaders: Headers): String {
+        requestHeaders["Cookie"]?.let { return it }
+
+        val existing = appClient.cookieJar.loadForRequest(url)
+            .filterNot { it.name == parameters.cookieName }
+            .joinToString("; ") { "${it.name}=${it.value}" }
+
+        val pow = "${parameters.cookieName}=${visitorCookieValue()}"
+
+        return if (existing.isBlank()) pow else "$existing; $pow"
+    }
+
+    private fun visitorCookieValue(): String {
         val now = System.currentTimeMillis()
 
-        if (now < cookieExpiresAt) {
-            return
-        }
+        visitorCookie?.takeIf { now < visitorCookieExpiresAt }?.let { return it }
 
         val payload = """{"ts":$now,"pow":"${ProofOfWork(parameters).solve(now)}"}"""
-        val cookie = Cookie.Builder()
-            .name(parameters.cookieName)
-            .value(Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP))
-            .domain(homeUrl.host)
-            .path("/")
-            .build()
+        val value = Base64.encodeToString(payload.toByteArray(), Base64.NO_WRAP)
 
-        client.cookieJar.saveFromResponse(homeUrl, listOf(cookie))
-        cookieExpiresAt = now + COOKIE_LIFETIME
+        visitorCookie = value
+        visitorCookieExpiresAt = now + COOKIE_LIFETIME
+
+        return value
     }
 
     private class CachedToken(val key: String, val value: String, private val expiresAt: Long) {
