@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -17,8 +18,10 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
 import kotlin.time.Duration.Companion.seconds
@@ -33,7 +36,6 @@ abstract class MangaLivre :
     override val supportsLatest: Boolean = true
 
     override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(ReadingGateInterceptor(baseUrl, network.client))
         .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
 
@@ -88,12 +90,8 @@ abstract class MangaLivre :
 
         filters.forEach { filter ->
             when (filter) {
-                is OrderByFilter -> {
-                    url.addQueryParameter("sortBy", filter.selected())
-                }
-                is OrderDirectionFilter -> {
-                    url.addQueryParameter("sortOrder", filter.selected())
-                }
+                is OrderByFilter -> url.addQueryParameter("sortBy", filter.selected())
+                is OrderDirectionFilter -> url.addQueryParameter("sortOrder", filter.selected())
                 else -> {}
             }
         }
@@ -124,10 +122,24 @@ abstract class MangaLivre :
 
     override fun pageListRequest(chapter: SChapter): Request {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
-        return GET("$apiUrl/mangas/${ref.mangaId}/chapters/${ref.chapterId}", headers)
+
+        val body = mapOf(
+            "mangaId" to ref.mangaId,
+            "chapterId" to ref.chapterId,
+            // Sem turnstileToken — confia nos cookies da sessão
+        )
+
+        return POST(
+            url = "$apiUrl/reader/chapter/access",
+            headers = headers,
+            body = body.toJsonString().toRequestBody("application/json".toMediaType()),
+        )
     }
 
-    override fun pageListParse(response: Response): List<Page> = response.parseJson<PageDto>().toPageList()
+    override fun pageListParse(response: Response): List<Page> {
+        val dto = response.parseAs<PageDto>()
+        return dto.toPageList()
+    }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
@@ -169,6 +181,20 @@ abstract class MangaLivre :
             }
             setDefaultValue(false)
         }.also(screen::addPreference)
+
+        // Instruções para o WebView funcionar
+        androidx.preference.Preference(screen.context).apply {
+            title = "⚠️ Configuração necessária para leitura"
+            summary = buildString {
+                append("Este site exige verificação Cloudflare Turnstile.\n\n")
+                append("1. Vá em Mais → Configurações → Avançado\n")
+                append("2. Defina o User-Agent da WebView como:\n")
+                append("Mozilla/5.0 (Linux; Android 16; 2311DRK48G Build/BP2A.250605.031.A3; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.181 Mobile Safari/537.36 GoogleApp/17.44.15.ve.arm64\n\n")
+                append("3. Desative 'DNS sobre HTTPS (DoH)'\n\n")
+                append("Depois, abra o capítulo pela WebView. O desafio será resolvido automaticamente.")
+            }
+            isSelectable = false
+        }.also(screen::addPreference)
     }
 
     // ============================== Utilities =======================================
@@ -196,4 +222,4 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-}
+    }
