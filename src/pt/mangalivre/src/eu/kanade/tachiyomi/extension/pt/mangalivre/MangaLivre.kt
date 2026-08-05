@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import android.widget.Toast
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -16,6 +17,8 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.encodeToString
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -123,16 +126,17 @@ abstract class MangaLivre :
     override fun pageListRequest(chapter: SChapter): Request {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
 
-        val body = mapOf(
-            "mangaId" to ref.mangaId,
-            "chapterId" to ref.chapterId,
-            // Sem turnstileToken — confia nos cookies da sessão
+        val body = Json.encodeToString(
+            mapOf(
+                "mangaId" to ref.mangaId,
+                "chapterId" to ref.chapterId,
+            )
         )
 
         return POST(
             url = "$apiUrl/reader/chapter/access",
             headers = headers,
-            body = body.toJsonString().toRequestBody("application/json".toMediaType()),
+            body = body.toRequestBody("application/json".toMediaType()),
         )
     }
 
@@ -181,20 +185,6 @@ abstract class MangaLivre :
             }
             setDefaultValue(false)
         }.also(screen::addPreference)
-
-        // Instruções para o WebView funcionar
-        androidx.preference.Preference(screen.context).apply {
-            title = "⚠️ Configuração necessária para leitura"
-            summary = buildString {
-                append("Este site exige verificação Cloudflare Turnstile.\n\n")
-                append("1. Vá em Mais → Configurações → Avançado\n")
-                append("2. Defina o User-Agent da WebView como:\n")
-                append("Mozilla/5.0 (Linux; Android 16; 2311DRK48G Build/BP2A.250605.031.A3; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.181 Mobile Safari/537.36 GoogleApp/17.44.15.ve.arm64\n\n")
-                append("3. Desative 'DNS sobre HTTPS (DoH)'\n\n")
-                append("Depois, abra o capítulo pela WebView. O desafio será resolvido automaticamente.")
-            }
-            isSelectable = false
-        }.also(screen::addPreference)
     }
 
     // ============================== Utilities =======================================
@@ -212,7 +202,13 @@ abstract class MangaLivre :
         private const val ALTERNATIVE_TITLE_PREF = "alternativeTitlePref"
         private const val MAX_PEEK = 1024L
         private const val NON_JSON_MESSAGE =
-            "Resposta não-JSON (Cloudflare ou header desatualizado). Abra a fonte na WebView do app e tente de novo."
+            "Este site exige verificação Cloudflare Turnstile.\n\n" +
+            "Para ler capítulos:\n" +
+            "1. Vá em Mais → Configurações → Avançado\n" +
+            "2. Defina o User-Agent da WebView como:\n" +
+            "Mozilla/5.0 (Linux; Android 16; 2311DRK48G Build/BP2A.250605.031.A3; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.181 Mobile Safari/537.36 GoogleApp/17.44.15.ve.arm64\n" +
+            "3. Desative 'DNS sobre HTTPS (DoH)'\n" +
+            "4. Abra o capítulo pela WebView"
 
         private const val SORT_POPULAR = "popular"
         private const val SORT_RELEASE = "release"
