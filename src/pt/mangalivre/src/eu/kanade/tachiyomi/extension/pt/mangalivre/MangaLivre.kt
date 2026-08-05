@@ -141,7 +141,7 @@ abstract class MangaLivre :
         )
 
         println("DEBUG body: $body")
-        println("DEBUG headers: ${headers.build()}")
+        println("DEBUG headers: ${headersBuilder().build()}")
         println("==========================================")
 
         return POST(
