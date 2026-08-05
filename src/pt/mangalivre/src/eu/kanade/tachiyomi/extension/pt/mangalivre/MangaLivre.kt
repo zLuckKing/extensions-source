@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import android.widget.Toast
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -126,12 +125,24 @@ abstract class MangaLivre :
     override fun pageListRequest(chapter: SChapter): Request {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
 
+        // DEBUG
+        println("========== DEBUG pageListRequest ==========")
+        println("DEBUG chapter.url: ${chapter.url}")
+        println("DEBUG chapter.name: ${chapter.name}")
+        println("DEBUG mangaId: ${ref.mangaId}")
+        println("DEBUG chapterId: ${ref.chapterId}")
+        println("DEBUG full URL: $apiUrl/reader/chapter/access")
+
         val body = Json.encodeToString(
             mapOf(
                 "mangaId" to ref.mangaId,
                 "chapterId" to ref.chapterId,
             )
         )
+
+        println("DEBUG body: $body")
+        println("DEBUG headers: ${headers.build()}")
+        println("==========================================")
 
         return POST(
             url = "$apiUrl/reader/chapter/access",
@@ -141,7 +152,23 @@ abstract class MangaLivre :
     }
 
     override fun pageListParse(response: Response): List<Page> {
+        // DEBUG
+        println("========== DEBUG pageListParse ==========")
+        println("DEBUG response code: ${response.code}")
+        println("DEBUG response message: ${response.message}")
+        println("DEBUG response headers: ${response.headers}")
+
+        val bodyString = response.peekBody(Long.MAX_VALUE).string()
+        println("DEBUG response body (primeiros 500 chars): ${bodyString.take(500)}")
+        println("==========================================")
+
+        if (!response.isSuccessful) {
+            response.close()
+            throw IOException("HTTP error ${response.code}: ${bodyString.take(200)}")
+        }
+
         val dto = response.parseAs<PageDto>()
+        println("DEBUG pages count: ${dto.pages.size}")
         return dto.toPageList()
     }
 
