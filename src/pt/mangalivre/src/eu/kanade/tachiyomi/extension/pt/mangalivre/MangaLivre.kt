@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import android.util.Log
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -125,13 +126,19 @@ abstract class MangaLivre :
     override fun pageListRequest(chapter: SChapter): Request {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
 
-        // DEBUG
-        println("========== DEBUG pageListRequest ==========")
-        println("DEBUG chapter.url: ${chapter.url}")
-        println("DEBUG chapter.name: ${chapter.name}")
-        println("DEBUG mangaId: ${ref.mangaId}")
-        println("DEBUG chapterId: ${ref.chapterId}")
-        println("DEBUG full URL: $apiUrl/reader/chapter/access")
+        // DEBUG usando Log.e para aparecer no logcat
+        Log.e("MANGALIVRE_DEBUG", "========== pageListRequest ==========")
+        Log.e("MANGALIVRE_DEBUG", "chapter.url: ${chapter.url}")
+        Log.e("MANGALIVRE_DEBUG", "chapter.name: ${chapter.name}")
+        Log.e("MANGALIVRE_DEBUG", "mangaId: ${ref.mangaId}")
+        Log.e("MANGALIVRE_DEBUG", "chapterId: ${ref.chapterId}")
+        Log.e("MANGALIVRE_DEBUG", "baseUrl: $baseUrl")
+
+        // Testando ambas as URLs possíveis
+        val urlRaiz = "$baseUrl/reader/chapter/access"
+        val urlApi = "$apiUrl/reader/chapter/access"
+        Log.e("MANGALIVRE_DEBUG", "URL raiz: $urlRaiz")
+        Log.e("MANGALIVRE_DEBUG", "URL api: $urlApi")
 
         val body = Json.encodeToString(
             mapOf(
@@ -140,27 +147,25 @@ abstract class MangaLivre :
             )
         )
 
-        println("DEBUG body: $body")
-        println("DEBUG headers: ${headersBuilder().build()}")
-        println("==========================================")
+        Log.e("MANGALIVRE_DEBUG", "body: $body")
+        Log.e("MANGALIVRE_DEBUG", "==========================================")
 
+        // Tentando primeiro a URL raiz (sem /api)
         return POST(
-            url = "$apiUrl/reader/chapter/access",
+            url = "$baseUrl/reader/chapter/access",
             headers = headers,
             body = body.toRequestBody("application/json".toMediaType()),
         )
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        // DEBUG
-        println("========== DEBUG pageListParse ==========")
-        println("DEBUG response code: ${response.code}")
-        println("DEBUG response message: ${response.message}")
-        println("DEBUG response headers: ${response.headers}")
+        Log.e("MANGALIVRE_DEBUG", "========== pageListParse ==========")
+        Log.e("MANGALIVRE_DEBUG", "response code: ${response.code}")
+        Log.e("MANGALIVRE_DEBUG", "response message: ${response.message}")
 
         val bodyString = response.peekBody(Long.MAX_VALUE).string()
-        println("DEBUG response body (primeiros 500 chars): ${bodyString.take(500)}")
-        println("==========================================")
+        Log.e("MANGALIVRE_DEBUG", "response body (primeiros 500): ${bodyString.take(500)}")
+        Log.e("MANGALIVRE_DEBUG", "==========================================")
 
         if (!response.isSuccessful) {
             response.close()
@@ -168,7 +173,7 @@ abstract class MangaLivre :
         }
 
         val dto = response.parseAs<PageDto>()
-        println("DEBUG pages count: ${dto.pages.size}")
+        Log.e("MANGALIVRE_DEBUG", "pages count: ${dto.pages.size}")
         return dto.toPageList()
     }
 
