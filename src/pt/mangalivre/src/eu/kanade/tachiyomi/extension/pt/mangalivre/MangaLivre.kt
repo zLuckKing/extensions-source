@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -15,18 +14,19 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.WebViewTimeoutException
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.encodeToString
+import keiyoushi.utils.runWebView
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
+import java.util.Collections
+import java.util.LinkedHashSet
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -123,59 +123,77 @@ abstract class MangaLivre :
 
     // ============================== Pages =======================================
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
+        val chapterUrl = "$baseUrl${chapter.url.substringBefore('#')}"
+        val imageUrls = Collections.synchronizedSet(LinkedHashSet<String>())
 
-        // DEBUG usando Log.e para aparecer no logcat
-        Log.e("MANGALIVRE_DEBUG", "========== pageListRequest ==========")
-        Log.e("MANGALIVRE_DEBUG", "chapter.url: ${chapter.url}")
-        Log.e("MANGALIVRE_DEBUG", "chapter.name: ${chapter.name}")
-        Log.e("MANGALIVRE_DEBUG", "mangaId: ${ref.mangaId}")
-        Log.e("MANGALIVRE_DEBUG", "chapterId: ${ref.chapterId}")
-        Log.e("MANGALIVRE_DEBUG", "baseUrl: $baseUrl")
+        Log.i(LOG_TAG, "Chapter URL: $chapterUrl")
+        Log.d(LOG_TAG, "Chapter reference loaded: mangaId=${ref.mangaId}, chapterId=${ref.chapterId}")
+        Log.i(LOG_TAG, "Starting WebView")
 
-        // Testando ambas as URLs possíveis
-        val urlRaiz = "$baseUrl/reader/chapter/access"
-        val urlApi = "$apiUrl/reader/chapter/access"
-        Log.e("MANGALIVRE_DEBUG", "URL raiz: $urlRaiz")
-        Log.e("MANGALIVRE_DEBUG", "URL api: $urlApi")
-
-        val body = Json.encodeToString(
-            mapOf(
-                "mangaId" to ref.mangaId,
-                "chapterId" to ref.chapterId,
-            )
-        )
-
-        Log.e("MANGALIVRE_DEBUG", "body: $body")
-        Log.e("MANGALIVRE_DEBUG", "==========================================")
-
-        // Tentando primeiro a URL raiz (sem /api)
-        return POST(
-            url = "$baseUrl/reader/chapter/access",
-            headers = headers,
-            body = body.toRequestBody("application/json".toMediaType()),
-        )
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        Log.e("MANGALIVRE_DEBUG", "========== pageListParse ==========")
-        Log.e("MANGALIVRE_DEBUG", "response code: ${response.code}")
-        Log.e("MANGALIVRE_DEBUG", "response message: ${response.message}")
-
-        val bodyString = response.peekBody(Long.MAX_VALUE).string()
-        Log.e("MANGALIVRE_DEBUG", "response body (primeiros 500): ${bodyString.take(500)}")
-        Log.e("MANGALIVRE_DEBUG", "==========================================")
-
-        if (!response.isSuccessful) {
-            response.close()
-            throw IOException("HTTP error ${response.code}: ${bodyString.take(200)}")
+        fun collect(rawUrl: String) {
+            val imageUrl = rawUrl.toCdnImageUrl() ?: return
+            if (imageUrls.add(imageUrl)) {
+                Log.d(LOG_TAG, "CDN URL found: $imageUrl")
+            }
         }
 
-        val dto = response.parseAs<PageDto>()
-        Log.e("MANGALIVRE_DEBUG", "pages count: ${dto.pages.size}")
-        return dto.toPageList()
+        try {
+            return runWebView(timeout = WEBVIEW_TIMEOUT) {
+                var previousCount = 0
+                var stablePolls = 0
+
+                javaScriptEnabled = true
+                domStorageEnabled = true
+
+                interceptRequest { request ->
+                    collect(request.url.toString())
+                    null
+                }
+                jsBridge(JS_BRIDGE_NAME) { payload ->
+                    payload.parseAs<List<String>>().forEach(::collect)
+                }
+                onPageFinished { url ->
+                    Log.i(LOG_TAG, "Page finished: $url")
+                    evaluateJs(COLLECT_IMAGE_URLS_SCRIPT)
+                }
+                onReceivedError { request, error ->
+                    Log.e(
+                        LOG_TAG,
+                        "WebView error ${error.errorCode} for ${request.url}: ${error.description}",
+                    )
+                }
+                poll(1.seconds) {
+                    evaluateJs(COLLECT_IMAGE_URLS_SCRIPT)
+                    val currentCount = imageUrls.size
+                    if (currentCount > 0 && currentCount == previousCount) {
+                        stablePolls++
+                    } else {
+                        stablePolls = 0
+                    }
+                    previousCount = currentCount
+                    if (stablePolls >= STABLE_POLLS) {
+                        val pages = imageUrls.toPageList()
+                        Log.i(LOG_TAG, "Pages found: ${pages.size}")
+                        resolve(pages)
+                    }
+                }
+                loadUrl(chapterUrl)
+            }
+        } catch (error: WebViewTimeoutException) {
+            Log.e(LOG_TAG, "WebView timeout after $WEBVIEW_TIMEOUT; URLs found: ${imageUrls.size}")
+            if (imageUrls.isNotEmpty()) {
+                return imageUrls.toPageList()
+            }
+            throw error
+        } catch (error: Throwable) {
+            Log.e(LOG_TAG, "WebView failed: ${error.javaClass.simpleName}: ${error.message}")
+            throw error
+        }
     }
+
+    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
@@ -231,6 +249,26 @@ abstract class MangaLivre :
     }
 
     companion object {
+        private const val LOG_TAG = "MANGALIVRE_READER"
+        private const val JS_BRIDGE_NAME = "MangaLivreReader"
+        private const val STABLE_POLLS = 3
+        private val WEBVIEW_TIMEOUT = 90.seconds
+        private const val CDN_HOST = "cdn.toonlivre.net"
+        private const val PROXY_HOST = "slightly-free-mayfly.edgecompute.app"
+        private val COLLECT_IMAGE_URLS_SCRIPT =
+            """
+            (() => {
+                const urls = new Set();
+                document.querySelectorAll('img').forEach((image) => {
+                    [image.currentSrc, image.src, image.dataset.src].forEach((url) => {
+                        if (url) urls.add(url);
+                    });
+                });
+                performance.getEntriesByType('resource').forEach((entry) => urls.add(entry.name));
+                $JS_BRIDGE_NAME.post(JSON.stringify(Array.from(urls)));
+            })();
+            """.trimIndent()
+
         private const val ALTERNATIVE_TITLE_PREF = "alternativeTitlePref"
         private const val MAX_PEEK = 1024L
         private const val NON_JSON_MESSAGE =
@@ -250,4 +288,19 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
+
+    private fun String.toCdnImageUrl(): String? {
+        val url = toHttpUrlOrNull() ?: return null
+        val candidate = when (url.host) {
+            CDN_HOST -> url
+            PROXY_HOST -> url.queryParameter("url")?.toHttpUrlOrNull()
+            else -> null
+        } ?: return null
+
+        return candidate.takeIf { it.isHttps && it.host == CDN_HOST }?.toString()
     }
+
+    private fun Set<String>.toPageList(): List<Page> = synchronized(this) {
+        mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
+    }
+}

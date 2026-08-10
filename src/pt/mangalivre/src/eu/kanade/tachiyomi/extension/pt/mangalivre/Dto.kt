@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
-import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.utils.toJsonString
@@ -96,10 +95,33 @@ class ChapterDto(
 }
 
 @Serializable
-class PageDto(
+class ReaderAccessResponseDto(
+    val chapter: ReaderChapterDto,
+    val grant: ReaderGrantDto,
+    val verifiedUser: Boolean,
+)
+
+@Serializable
+class ReaderChapterDto(
+    val id: String,
+    val mangaId: String,
+    val number: String,
+    val title: String,
+    val releaseDate: String,
+    val timestamp: Long,
+    val pageCount: Int,
     val pages: List<String>,
-) {
-    fun toPageList() = pages.mapIndexed { index, imageUrl ->
-        Page(index, imageUrl = imageUrl)
-    }
-}
+)
+
+@Serializable
+class ReaderGrantDto(
+    val token: String,
+    val expiresAt: Long,
+    val expiresMs: Long,
+)
+
+@Serializable
+class ReaderAccessErrorDto(
+    val error: String,
+    val requiresTurnstile: Boolean = false,
+)
