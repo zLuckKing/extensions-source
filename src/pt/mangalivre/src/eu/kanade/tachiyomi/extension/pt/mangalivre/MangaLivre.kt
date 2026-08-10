@@ -136,6 +136,8 @@ abstract class MangaLivre :
     ): List<Page> {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
         val chapterUrl = "$baseUrl${chapter.url.substringBefore('#')}"
+        val chapterNumber = chapterUrl.toHttpUrl().pathSegments.last { it.isNotEmpty() }
+        val rawCandidates = Collections.synchronizedSet(LinkedHashSet<String>())
         val imageUrls = Collections.synchronizedSet(LinkedHashSet<String>())
 
         Log.i(LOG_TAG, "Chapter URL: $chapterUrl")
@@ -144,6 +146,8 @@ abstract class MangaLivre :
 
         fun collect(rawUrl: String) {
             val imageUrl = rawUrl.toCdnImageUrl() ?: return
+            rawCandidates.add(imageUrl)
+            if (!imageUrl.isChapterImage(ref.mangaId, chapterNumber)) return
             if (imageUrls.add(imageUrl)) {
                 Log.d(LOG_TAG, "CDN URL found: $imageUrl")
             }
@@ -184,7 +188,7 @@ abstract class MangaLivre :
                     }
                     previousCount = currentCount
                     if (stablePolls >= STABLE_POLLS) {
-                        val pages = imageUrls.toPageList()
+                        val pages = imageUrls.toPageList(rawCandidates.size)
                         Log.i(LOG_TAG, "Pages found: ${pages.size}")
                         resolve(pages)
                     }
@@ -194,7 +198,7 @@ abstract class MangaLivre :
         } catch (error: WebViewTimeoutException) {
             Log.e(LOG_TAG, "WebView timeout after $WEBVIEW_TIMEOUT; URLs found: ${imageUrls.size}")
             if (imageUrls.isNotEmpty()) {
-                return imageUrls.toPageList()
+                return imageUrls.toPageList(rawCandidates.size)
             }
             throw error
         } catch (error: Throwable) {
@@ -265,6 +269,7 @@ abstract class MangaLivre :
         private val WEBVIEW_TIMEOUT = 90.seconds
         private const val CDN_HOST = "cdn.toonlivre.net"
         private const val PROXY_HOST = "slightly-free-mayfly.edgecompute.app"
+        private val PAGE_NUMBER_REGEX = Regex("""_(\d+)\.[^.]+$""")
         private val COLLECT_IMAGE_URLS_SCRIPT =
             """
             (() => {
@@ -310,7 +315,28 @@ abstract class MangaLivre :
         return candidate.takeIf { it.isHttps && it.host == CDN_HOST }?.toString()
     }
 
-    private fun Set<String>.toPageList(): List<Page> = synchronized(this) {
-        mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
+    private fun String.isChapterImage(mangaId: String, chapterNumber: String): Boolean {
+        val pathSegments = toHttpUrl().pathSegments
+        return pathSegments.size >= 4 &&
+            pathSegments[0] == "obras" &&
+            pathSegments[1] == mangaId &&
+            pathSegments[2] == chapterNumber &&
+            pathSegments[3].isNotEmpty()
     }
+
+    private fun Set<String>.toPageList(rawCandidateCount: Int): List<Page> = synchronized(this) {
+        val sortedUrls = sortedWith(
+            compareBy<String>({ it.pageNumber() ?: Int.MAX_VALUE }, { it }),
+        )
+        Log.i(LOG_TAG, "Raw CDN candidates: $rawCandidateCount")
+        Log.i(LOG_TAG, "Candidates after chapter filter: ${sortedUrls.size}")
+        Log.i(LOG_TAG, "Final page order: ${sortedUrls.joinToString { it.toHttpUrl().pathSegments.last() }}")
+        sortedUrls.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
+    }
+
+    private fun String.pageNumber(): Int? = toHttpUrl().pathSegments.lastOrNull()
+        ?.let(PAGE_NUMBER_REGEX::find)
+        ?.groupValues
+        ?.get(1)
+        ?.toIntOrNull()
 }
