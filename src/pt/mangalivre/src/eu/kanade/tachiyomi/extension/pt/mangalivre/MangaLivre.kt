@@ -18,6 +18,7 @@ import keiyoushi.utils.WebViewTimeoutException
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
+import kotlinx.coroutines.runBlocking
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -27,6 +28,7 @@ import okhttp3.Response
 import java.io.IOException
 import java.util.Collections
 import java.util.LinkedHashSet
+import rx.Observable
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -123,7 +125,15 @@ abstract class MangaLivre :
 
     // ============================== Pages =======================================
 
-    override suspend fun getPageList(chapter: SChapter): List<Page> {
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
+        runBlocking {
+            getPageListWithWebView(chapter)
+        }
+    }
+
+    private suspend fun getPageListWithWebView(
+        chapter: SChapter,
+    ): List<Page> {
         val ref = chapter.url.substringAfterLast("#").parseAs<ChapterReferenceDto>()
         val chapterUrl = "$baseUrl${chapter.url.substringBefore('#')}"
         val imageUrls = Collections.synchronizedSet(LinkedHashSet<String>())
