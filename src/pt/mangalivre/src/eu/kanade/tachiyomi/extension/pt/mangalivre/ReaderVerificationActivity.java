@@ -31,7 +31,7 @@ public class ReaderVerificationActivity extends Activity {
   private static final String SITE_HOST = "toonlivre.net";
   private static final String CDN_HOST = "cdn.toonlivre.net";
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
-  private static final long SETTLE_DELAY_MS = 3_000L;
+  private static final long SETTLE_DELAY_MS = 1_000L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
