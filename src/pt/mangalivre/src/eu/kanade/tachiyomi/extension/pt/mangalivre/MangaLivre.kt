@@ -189,7 +189,9 @@ abstract class MangaLivre :
     private fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
         val request = POST(
             "$apiUrl/reader/chapter/access",
-            headers,
+            headers.newBuilder()
+                .add("Origin", baseUrl)
+                .build(),
             ref.toJsonRequestBody(),
         )
 
