@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import android.content.ComponentName
 import android.content.Intent
+import android.util.Log
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -144,6 +145,7 @@ abstract class MangaLivre :
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
         val readerUrl = chapterUrl.newBuilder().fragment(null).build().toString()
         val ref = refreshChapterReference(storedRef, chapterNumber)
+        Log.d(LOG_TAG, "Chapter $chapterNumber stored=${storedRef.mangaId}/${storedRef.chapterId} resolved=${ref.mangaId}/${ref.chapterId}")
 
         fetchReaderAccess(ref)?.let { access ->
             return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
@@ -170,13 +172,17 @@ abstract class MangaLivre :
 
         return runCatching {
             client.newCall(request).execute().use { response ->
+                Log.d(LOG_TAG, "Reference refresh status=${response.code} mangaId=${storedRef.mangaId}")
                 if (!response.isSuccessful) return@use storedRef
 
                 val manga = response.parseAs<MangaDto>()
                 val chapter = manga.chapters?.firstOrNull { it.number == chapterNumber }
-                    ?: return@use storedRef
+                Log.d(LOG_TAG, "Reference refresh chapters=${manga.chapters?.size ?: 0} matched=${chapter != null}")
+                if (chapter == null) return@use storedRef
                 ChapterReferenceDto(manga.id, chapter.id)
             }
+        }.onFailure { error ->
+            Log.e(LOG_TAG, "Reference refresh failed: ${error.message}")
         }.getOrDefault(storedRef)
     }
 
@@ -188,6 +194,7 @@ abstract class MangaLivre :
         )
 
         client.newCall(request).execute().use { response ->
+            Log.d(LOG_TAG, "Reader access status=${response.code} mangaId=${ref.mangaId} chapterId=${ref.chapterId}")
             if (response.isSuccessful) return response.parseAs()
 
             val error = response.parseAs<ReaderAccessErrorDto>()
@@ -271,6 +278,7 @@ abstract class MangaLivre :
     }
 
     companion object {
+        private const val LOG_TAG = "MANGALIVRE_READER"
         private const val VERIFICATION_POLLS = 90
         private val VERIFICATION_POLL_INTERVAL = 1.seconds
         private const val WEBVIEW_ACTIVITY = "eu.kanade.tachiyomi.ui.webview.WebViewActivity"
