@@ -140,9 +140,10 @@ abstract class MangaLivre :
         chapter: SChapter,
     ): List<Page> {
         val chapterUrl = "$baseUrl${chapter.url}".toHttpUrl()
-        val ref = chapterUrl.fragment!!.parseAs<ChapterReferenceDto>()
+        val storedRef = chapterUrl.fragment!!.parseAs<ChapterReferenceDto>()
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
         val readerUrl = chapterUrl.newBuilder().fragment(null).build().toString()
+        val ref = refreshChapterReference(storedRef, chapterNumber)
 
         fetchReaderAccess(ref)?.let { access ->
             return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
@@ -159,6 +160,24 @@ abstract class MangaLivre :
         }
 
         throw IOException("Tempo esgotado. Conclua a verificação na WebView e tente novamente.")
+    }
+
+    private fun refreshChapterReference(
+        storedRef: ChapterReferenceDto,
+        chapterNumber: String,
+    ): ChapterReferenceDto {
+        val request = GET("$apiUrl/manga-by-slug/${storedRef.mangaId}", headers)
+
+        return runCatching {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use storedRef
+
+                val manga = response.parseAs<MangaDto>()
+                val chapter = manga.chapters?.firstOrNull { it.number == chapterNumber }
+                    ?: return@use storedRef
+                ChapterReferenceDto(manga.id, chapter.id)
+            }
+        }.getOrDefault(storedRef)
     }
 
     private fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
