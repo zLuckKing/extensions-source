@@ -24,6 +24,7 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import okhttp3.CookieJar
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -46,6 +47,12 @@ abstract class MangaLivre :
     override val client: OkHttpClient = network.client.newBuilder()
         .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
+
+    private val readerClient by lazy {
+        client.newBuilder()
+            .cookieJar(CookieJar.NO_COOKIES)
+            .build()
+    }
 
     private val apiUrl: String = "$baseUrl/api"
 
@@ -202,7 +209,7 @@ abstract class MangaLivre :
             ref.toJsonRequestBody(),
         )
 
-        client.newCall(request).execute().use { response ->
+        readerClient.newCall(request).execute().use { response ->
             Log.d(LOG_TAG, "Reader access status=${response.code} mangaId=${ref.mangaId} chapterId=${ref.chapterId}")
             if (response.isSuccessful) return response.parseAs()
 
