@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 import android.content.ComponentName
 import android.content.Intent
 import android.util.Log
+import android.webkit.CookieManager
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -187,11 +188,17 @@ abstract class MangaLivre :
     }
 
     private fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
+        val requestHeaders = headers.newBuilder()
+            .add("Origin", baseUrl)
+            .apply {
+                CookieManager.getInstance().getCookie(baseUrl)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { add("Cookie", it) }
+            }
+            .build()
         val request = POST(
             "$apiUrl/reader/chapter/access",
-            headers.newBuilder()
-                .add("Origin", baseUrl)
-                .build(),
+            requestHeaders,
             ref.toJsonRequestBody(),
         )
 
