@@ -296,7 +296,7 @@ abstract class MangaLivre :
 
     private fun List<String>.toPageList(mangaId: String, chapterNumber: String): List<Page> {
         val sortedUrls = asSequence()
-            .mapNotNull(String::toCdnImageUrl)
+            .mapNotNull { it.toCdnImageUrl() }
             .filter { it.isChapterImage(mangaId, chapterNumber) }
             .distinct()
             .sortedWith(
