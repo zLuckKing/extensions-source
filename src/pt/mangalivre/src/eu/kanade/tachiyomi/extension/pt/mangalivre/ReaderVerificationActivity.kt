@@ -10,6 +10,7 @@ import android.os.ResultReceiver
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import org.json.JSONArray
@@ -63,7 +64,10 @@ class ReaderVerificationActivity : Activity() {
                 bridgeName,
             )
             webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                ): WebResourceResponse? {
                     request?.url?.toString()?.let(::addCandidate)
                     return null
                 }
