@@ -2,8 +2,11 @@ package eu.kanade.tachiyomi.extension.pt.mangalivre
 
 import android.content.ComponentName
 import android.content.Intent
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.ResultReceiver
 import android.util.Log
-import android.webkit.CookieManager
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -22,9 +25,9 @@ import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
-import okhttp3.CookieJar
+import kotlinx.coroutines.withTimeout
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -33,6 +36,7 @@ import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
 import java.io.IOException
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -47,12 +51,6 @@ abstract class MangaLivre :
     override val client: OkHttpClient = network.client.newBuilder()
         .rateLimit(2, 1.seconds) { it.host == baseUrlHost }
         .build()
-
-    private val readerClient by lazy {
-        client.newBuilder()
-            .cookieJar(CookieJar.NO_COOKIES)
-            .build()
-    }
 
     private val apiUrl: String = "$baseUrl/api"
 
@@ -159,17 +157,8 @@ abstract class MangaLivre :
             return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
         }
 
-        openVerificationWebView(readerUrl)
-
-        repeat(VERIFICATION_POLLS) {
-            delay(VERIFICATION_POLL_INTERVAL)
-            fetchReaderAccess(ref)?.let { access ->
-                returnToReader()
-                return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
-            }
-        }
-
-        throw IOException("Tempo esgotado. Conclua a verificação na WebView e tente novamente.")
+        return openVerificationWebView(readerUrl, ref.mangaId, chapterNumber)
+            .toPageList(ref.mangaId, chapterNumber)
     }
 
     private fun refreshChapterReference(
@@ -197,11 +186,6 @@ abstract class MangaLivre :
     private fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
         val requestHeaders = headers.newBuilder()
             .add("Origin", baseUrl)
-            .apply {
-                CookieManager.getInstance().getCookie(baseUrl)
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { add("Cookie", it) }
-            }
             .build()
         val request = POST(
             "$apiUrl/reader/chapter/access",
@@ -209,7 +193,7 @@ abstract class MangaLivre :
             ref.toJsonRequestBody(),
         )
 
-        readerClient.newCall(request).execute().use { response ->
+        client.newCall(request).execute().use { response ->
             Log.d(LOG_TAG, "Reader access status=${response.code} mangaId=${ref.mangaId} chapterId=${ref.chapterId}")
             if (response.isSuccessful) return response.parseAs()
 
@@ -219,23 +203,34 @@ abstract class MangaLivre :
         }
     }
 
-    private fun openVerificationWebView(readerUrl: String) {
+    private suspend fun openVerificationWebView(
+        readerUrl: String,
+        mangaId: String,
+        chapterNumber: String,
+    ): List<String> {
+        val result = CompletableDeferred<List<String>>()
+        val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
+            override fun onReceiveResult(resultCode: Int, resultData: Bundle?) {
+                val pages = resultData?.getStringArrayList(ReaderVerificationActivity.EXTRA_PAGES).orEmpty()
+                if (resultCode == ReaderVerificationActivity.RESULT_PAGES && pages.isNotEmpty()) {
+                    result.complete(pages)
+                } else {
+                    result.completeExceptionally(IOException("Verificação cancelada."))
+                }
+            }
+        }
         val intent = Intent().apply {
-            component = ComponentName(applicationContext, WEBVIEW_ACTIVITY)
+            component = ComponentName(EXTENSION_PACKAGE, ReaderVerificationActivity::class.java.name)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra("url_key", readerUrl)
-            putExtra("source_key", id)
-            putExtra("title_key", "Conclua a verificação para abrir o capítulo")
+            putExtra(ReaderVerificationActivity.EXTRA_URL, readerUrl)
+            putExtra(ReaderVerificationActivity.EXTRA_MANGA_ID, mangaId)
+            putExtra(ReaderVerificationActivity.EXTRA_CHAPTER_NUMBER, chapterNumber)
+            putExtra(ReaderVerificationActivity.EXTRA_RECEIVER, receiver)
         }
         applicationContext.startActivity(intent)
-    }
-
-    private fun returnToReader() {
-        val intent = Intent().apply {
-            component = ComponentName(applicationContext, READER_ACTIVITY)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        return withTimeout(VERIFICATION_TIMEOUT) {
+            result.await()
         }
-        applicationContext.startActivity(intent)
     }
 
     override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
@@ -295,10 +290,8 @@ abstract class MangaLivre :
 
     companion object {
         private const val LOG_TAG = "MANGALIVRE_READER"
-        private const val VERIFICATION_POLLS = 90
-        private val VERIFICATION_POLL_INTERVAL = 1.seconds
-        private const val WEBVIEW_ACTIVITY = "eu.kanade.tachiyomi.ui.webview.WebViewActivity"
-        private const val READER_ACTIVITY = "eu.kanade.tachiyomi.ui.reader.ReaderActivity"
+        private val VERIFICATION_TIMEOUT = 2.minutes
+        private const val EXTENSION_PACKAGE = "eu.kanade.tachiyomi.extension.pt.mangalivre"
         private const val CDN_HOST = "cdn.toonlivre.net"
         private const val PROXY_HOST = "slightly-free-mayfly.edgecompute.app"
         private val PAGE_NUMBER_REGEX = Regex("""_(\d+)\.[^.]+$""")
