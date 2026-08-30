@@ -17,22 +17,25 @@ import org.json.JSONArray
 import java.util.UUID
 
 class ReaderVerificationActivity : Activity() {
-
     private val handler = Handler(Looper.getMainLooper())
     private val pages = linkedSetOf<String>()
     private lateinit var receiver: ResultReceiver
     private lateinit var pathPrefix: String
     private var delivered = false
 
-    private val deliverPages = Runnable {
-        if (pages.isNotEmpty()) {
-            delivered = true
-            receiver.send(RESULT_PAGES, Bundle().apply {
-                putStringArrayList(EXTRA_PAGES, synchronized(pages) { ArrayList(pages) })
-            })
-            finish()
+    private val deliverPages =
+        Runnable {
+            if (pages.isNotEmpty()) {
+                delivered = true
+                receiver.send(
+                    RESULT_PAGES,
+                    Bundle().apply {
+                        putStringArrayList(EXTRA_PAGES, synchronized(pages) { ArrayList(pages) })
+                    },
+                )
+                finish()
+            }
         }
-    }
 
     @Suppress("DEPRECATION")
     @SuppressLint("SetJavaScriptEnabled")
@@ -47,51 +50,56 @@ class ReaderVerificationActivity : Activity() {
         pathPrefix = "/obras/$mangaId/$chapterNumber/"
 
         val bridgeName = "bridge_${UUID.randomUUID().toString().replace("-", "")}"
-        val webView = WebView(this).apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            webChromeClient = WebChromeClient()
-            addJavascriptInterface(
-                object {
-                    @JavascriptInterface
-                    fun post(value: String) {
-                        runCatching {
-                            val values = JSONArray(value)
-                            repeat(values.length()) { index -> addCandidate(values.getString(index)) }
+        val webView =
+            WebView(this).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                webChromeClient = WebChromeClient()
+                addJavascriptInterface(
+                    object {
+                        @JavascriptInterface
+                        fun post(value: String) {
+                            runCatching {
+                                val values = JSONArray(value)
+                                repeat(values.length()) { index -> addCandidate(values.getString(index)) }
+                            }
+                        }
+                    },
+                    bridgeName,
+                )
+                webViewClient =
+                    object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                        ): WebResourceResponse? {
+                            request?.url?.toString()?.let(::addCandidate)
+                            return null
+                        }
+
+                        override fun onPageFinished(
+                            view: WebView,
+                            url: String,
+                        ) {
+                            view.evaluateJavascript(
+                                """
+                                (() => {
+                                  if (window.__toonLivreCollector) return;
+                                  window.__toonLivreCollector = setInterval(() => {
+                                    const urls = [
+                                      ...performance.getEntriesByType('resource').map(entry => entry.name),
+                                      ...Array.from(document.images).map(image => image.currentSrc || image.src),
+                                    ];
+                                    window['$bridgeName'].post(JSON.stringify(urls));
+                                  }, 500);
+                                })();
+                                """.trimIndent(),
+                                null,
+                            )
                         }
                     }
-                },
-                bridgeName,
-            )
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                ): WebResourceResponse? {
-                    request?.url?.toString()?.let(::addCandidate)
-                    return null
-                }
-
-                override fun onPageFinished(view: WebView, url: String) {
-                    view.evaluateJavascript(
-                        """
-                        (() => {
-                          if (window.__toonLivreCollector) return;
-                          window.__toonLivreCollector = setInterval(() => {
-                            const urls = [
-                              ...performance.getEntriesByType('resource').map(entry => entry.name),
-                              ...Array.from(document.images).map(image => image.currentSrc || image.src),
-                            ];
-                            window['$bridgeName'].post(JSON.stringify(urls));
-                          }, 500);
-                        })();
-                        """.trimIndent(),
-                        null,
-                    )
-                }
+                loadUrl(readerUrl)
             }
-            loadUrl(readerUrl)
-        }
         setContentView(webView)
     }
 
@@ -106,12 +114,14 @@ class ReaderVerificationActivity : Activity() {
 
     private fun String.toCdnUrl(): String? {
         val uri = runCatching { Uri.parse(this) }.getOrNull() ?: return null
-        val cdnUri = when (uri.host) {
-            CDN_HOST -> uri
-            PROXY_HOST -> uri.getQueryParameter("url")?.let(Uri::parse) ?: return null
-            else -> return null
-        }
-        return cdnUri.takeIf { it.scheme == "https" && it.host == CDN_HOST && it.path.orEmpty().startsWith(pathPrefix) }
+        val cdnUri =
+            when (uri.host) {
+                CDN_HOST -> uri
+                PROXY_HOST -> uri.getQueryParameter("url")?.let(Uri::parse) ?: return null
+                else -> return null
+            }
+        return cdnUri
+            .takeIf { it.scheme == "https" && it.host == CDN_HOST && it.path.orEmpty().startsWith(pathPrefix) }
             ?.toString()
     }
 
