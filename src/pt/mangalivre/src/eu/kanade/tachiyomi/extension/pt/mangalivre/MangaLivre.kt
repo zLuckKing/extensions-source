@@ -27,6 +27,8 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -56,6 +58,7 @@ abstract class MangaLivre :
     private val apiUrl: String = "$baseUrl/api"
 
     private val preferences by getPreferencesLazy()
+    private val verificationMutex = Mutex()
 
     override fun headersBuilder(): Headers.Builder = super
         .headersBuilder()
@@ -171,8 +174,14 @@ abstract class MangaLivre :
             return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
         }
 
-        return openVerificationWebView(readerUrl, ref.mangaId, chapterNumber)
-            .toPageList(ref.mangaId, chapterNumber)
+        return verificationMutex.withLock {
+            fetchReaderAccess(ref)?.let { access ->
+                return@withLock access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
+            }
+
+            openVerificationWebView(readerUrl, ref.mangaId, chapterNumber)
+                .toPageList(ref.mangaId, chapterNumber)
+        }
     }
 
     private fun refreshChapterReference(

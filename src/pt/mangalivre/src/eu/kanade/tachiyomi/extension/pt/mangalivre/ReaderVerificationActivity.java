@@ -105,6 +105,12 @@ public class ReaderVerificationActivity extends Activity {
           }
 
           @Override
+          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+            Uri target = request.getUrl();
+            return request.isForMainFrame() && !SITE_HOST.equals(target.getHost());
+          }
+
+          @Override
           public void onPageFinished(WebView view, String url) {
             String script =
                 "(() => {"
