@@ -82,6 +82,22 @@ class ChapterReferenceDto(
 )
 
 @Serializable
+class ReaderAccessResponseDto(
+    val chapter: ReaderChapterDto,
+)
+
+@Serializable
+class ReaderChapterDto(
+    val pages: List<String>,
+)
+
+@Serializable
+class ReaderAccessErrorDto(
+    val error: String,
+    val requiresFcaptcha: Boolean = false,
+)
+
+@Serializable
 class ChapterDto(
     val id: String,
     val number: String,

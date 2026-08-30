@@ -1,8 +1,11 @@
 package eu.kanade.tachiyomi.extension.pt.mangalivre
 
+import android.content.ComponentName
+import android.content.Intent
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -13,10 +16,11 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.WebViewTimeoutException
+import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.runWebView
+import keiyoushi.utils.toJsonRequestBody
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -26,8 +30,6 @@ import okhttp3.Request
 import okhttp3.Response
 import rx.Observable
 import java.io.IOException
-import java.util.Collections
-import java.util.LinkedHashSet
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -130,68 +132,68 @@ abstract class MangaLivre :
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = Observable.fromCallable {
         runBlocking {
-            getPageListWithWebView(chapter)
+            getPageListWithVerification(chapter)
         }
     }
 
-    private suspend fun getPageListWithWebView(
+    private suspend fun getPageListWithVerification(
         chapter: SChapter,
     ): List<Page> {
         val chapterUrl = "$baseUrl${chapter.url}".toHttpUrl()
         val ref = chapterUrl.fragment!!.parseAs<ChapterReferenceDto>()
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
         val readerUrl = chapterUrl.newBuilder().fragment(null).build().toString()
-        val imageUrls = Collections.synchronizedSet(LinkedHashSet<String>())
-        val bridgeName = (1..(10..20).random())
-            .map { (('a'..'z') + ('A'..'Z')).random() }
-            .joinToString("")
-        val collectImageUrlsScript = collectImageUrlsScript(bridgeName)
 
-        fun collect(rawUrl: String) {
-            val imageUrl = rawUrl.toCdnImageUrl() ?: return
-            if (!imageUrl.isChapterImage(ref.mangaId, chapterNumber)) return
-            imageUrls.add(imageUrl)
+        fetchReaderAccess(ref)?.let { access ->
+            return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
         }
 
-        try {
-            return runWebView(timeout = WEBVIEW_TIMEOUT) {
-                var previousCount = 0
-                var stablePolls = 0
+        openVerificationWebView(readerUrl)
 
-                javaScriptEnabled = true
-                domStorageEnabled = true
-
-                interceptRequest { request ->
-                    collect(request.url.toString())
-                    null
-                }
-                jsBridge(bridgeName) { payload ->
-                    payload.parseAs<List<String>>().forEach(::collect)
-                }
-                onPageFinished {
-                    evaluateJs(collectImageUrlsScript)
-                }
-                poll(1.seconds) {
-                    evaluateJs(collectImageUrlsScript)
-                    val currentCount = imageUrls.size
-                    if (currentCount > 0 && currentCount == previousCount) {
-                        stablePolls++
-                    } else {
-                        stablePolls = 0
-                    }
-                    previousCount = currentCount
-                    if (stablePolls >= STABLE_POLLS) {
-                        resolve(imageUrls.toPageList())
-                    }
-                }
-                loadUrl(readerUrl)
+        repeat(VERIFICATION_POLLS) {
+            delay(VERIFICATION_POLL_INTERVAL)
+            fetchReaderAccess(ref)?.let { access ->
+                returnToReader()
+                return access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
             }
-        } catch (error: WebViewTimeoutException) {
-            if (imageUrls.isNotEmpty()) {
-                return imageUrls.toPageList()
-            }
-            throw error
         }
+
+        throw IOException("Tempo esgotado. Conclua a verificação na WebView e tente novamente.")
+    }
+
+    private fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
+        val request = POST(
+            "$apiUrl/reader/chapter/access",
+            headers,
+            ref.toJsonRequestBody(),
+        )
+
+        client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) return response.parseAs()
+
+            val error = response.parseAs<ReaderAccessErrorDto>()
+            if (response.code == 403 && error.requiresFcaptcha) return null
+            throw IOException(error.error)
+        }
+    }
+
+    private fun openVerificationWebView(readerUrl: String) {
+        val intent = Intent().apply {
+            component = ComponentName(applicationContext, WEBVIEW_ACTIVITY)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra("url_key", readerUrl)
+            putExtra("source_key", id)
+            putExtra("title_key", "Conclua a verificação para abrir o capítulo")
+        }
+        applicationContext.startActivity(intent)
+    }
+
+    private fun returnToReader() {
+        val intent = Intent().apply {
+            component = ComponentName(applicationContext, READER_ACTIVITY)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        applicationContext.startActivity(intent)
     }
 
     override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
@@ -250,8 +252,10 @@ abstract class MangaLivre :
     }
 
     companion object {
-        private const val STABLE_POLLS = 3
-        private val WEBVIEW_TIMEOUT = 90.seconds
+        private const val VERIFICATION_POLLS = 90
+        private val VERIFICATION_POLL_INTERVAL = 1.seconds
+        private const val WEBVIEW_ACTIVITY = "eu.kanade.tachiyomi.ui.webview.WebViewActivity"
+        private const val READER_ACTIVITY = "eu.kanade.tachiyomi.ui.reader.ReaderActivity"
         private const val CDN_HOST = "cdn.toonlivre.net"
         private const val PROXY_HOST = "slightly-free-mayfly.edgecompute.app"
         private val PAGE_NUMBER_REGEX = Regex("""_(\d+)\.[^.]+$""")
@@ -269,20 +273,6 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-
-    private fun collectImageUrlsScript(bridgeName: String) =
-        """
-        (() => {
-            const urls = new Set();
-            document.querySelectorAll('img').forEach((image) => {
-                [image.currentSrc, image.src, image.dataset.src].forEach((url) => {
-                    if (url) urls.add(url);
-                });
-            });
-            performance.getEntriesByType('resource').forEach((entry) => urls.add(entry.name));
-            $bridgeName.post(JSON.stringify(Array.from(urls)));
-        })();
-        """.trimIndent()
 
     private fun String.toCdnImageUrl(): String? {
         val url = toHttpUrlOrNull() ?: return null
@@ -304,11 +294,16 @@ abstract class MangaLivre :
             pathSegments[3].isNotEmpty()
     }
 
-    private fun Set<String>.toPageList(): List<Page> = synchronized(this) {
-        val sortedUrls = sortedWith(
-            compareBy<String>({ it.pageNumber() ?: Int.MAX_VALUE }, { it }),
-        )
-        sortedUrls.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
+    private fun List<String>.toPageList(mangaId: String, chapterNumber: String): List<Page> {
+        val sortedUrls = asSequence()
+            .mapNotNull(String::toCdnImageUrl)
+            .filter { it.isChapterImage(mangaId, chapterNumber) }
+            .distinct()
+            .sortedWith(
+                compareBy<String>({ it.pageNumber() ?: Int.MAX_VALUE }, { it }),
+            )
+            .toList()
+        return sortedUrls.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
     }
 
     private fun String.pageNumber(): Int? = toHttpUrl().pathSegments.lastOrNull()
