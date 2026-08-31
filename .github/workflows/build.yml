@@ -1,14 +1,11 @@
-name: Build MangaLivre APK
+name: Build Argos Comics APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ fix/argoscomics-next-actions ]
     paths:
-      - 'src/pt/mangalivre/**'
-  pull_request:
-    branches: [ main, master ]
-    paths:
-      - 'src/pt/mangalivre/**'
+      - 'src/pt/argoscomics/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
@@ -29,13 +26,13 @@ jobs:
         uses: gradle/gradle-build-action@v2
 
       - name: Fix formatting (spotless)
-        run: ./gradlew :src:pt:mangalivre:spotlessApply
+        run: ./gradlew :src:pt:argoscomics:spotlessApply
 
       - name: Build extension APK
-        run: ./gradlew :src:pt:mangalivre:assembleRelease
+        run: ./gradlew :src:pt:argoscomics:assembleRelease
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mangalivre-apk
-          path: src/pt/mangalivre/build/outputs/apk/release/*.apk
+          name: argoscomics-apk
+          path: src/pt/argoscomics/build/outputs/apk/release/*.apk
