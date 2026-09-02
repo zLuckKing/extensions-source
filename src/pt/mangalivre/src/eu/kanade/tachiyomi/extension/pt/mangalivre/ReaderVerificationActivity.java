@@ -43,6 +43,7 @@ public class ReaderVerificationActivity extends Activity {
 
   private final Runnable deliverPages =
       () -> {
+        if (delivered) return;
         ArrayList<String> result;
         synchronized (pages) {
           if (pages.isEmpty()) return;
@@ -84,13 +85,12 @@ public class ReaderVerificationActivity extends Activity {
         new Object() {
           @JavascriptInterface
           public void post(String value) {
-            try {
-              JSONArray values = new JSONArray(value);
-              for (int index = 0; index < values.length(); index++) {
-                addCandidate(values.getString(index));
-              }
-            } catch (JSONException ignored) {
-            }
+            addCandidates(value, false);
+          }
+
+          @JavascriptInterface
+          public void postPages(String value) {
+            addCandidates(value, true);
           }
         },
         bridgeName);
@@ -100,7 +100,7 @@ public class ReaderVerificationActivity extends Activity {
           public WebResourceResponse shouldInterceptRequest(
               WebView view, WebResourceRequest request) {
             if (request != null && request.getUrl() != null) {
-              addCandidate(request.getUrl().toString());
+              addCandidate(request.getUrl().toString(), true);
             }
             return null;
           }
@@ -115,16 +115,34 @@ public class ReaderVerificationActivity extends Activity {
           public void onPageFinished(WebView view, String url) {
             String script =
                 "(() => {"
-                    + "if (window.__toonLivreCollector) return;"
+                    + "const bridge = window['"
+                    + bridgeName
+                    + "'];"
+                    + "if (!window.__toonLivreFetchWrapped) {"
+                    + "window.__toonLivreFetchWrapped = true;"
+                    + "const originalFetch = window.fetch;"
+                    + "window.fetch = async function(...args) {"
+                    + "const response = await originalFetch.apply(this, args);"
+                    + "try {"
+                    + "const requestUrl = typeof args[0] === 'string' ? args[0] : args[0].url;"
+                    + "if (response.ok && new URL(requestUrl, location.href).pathname === '/api/reader/chapter/access') {"
+                    + "response.clone().json().then(data => {"
+                    + "if (Array.isArray(data?.chapter?.pages)) bridge.postPages(JSON.stringify(data.chapter.pages));"
+                    + "}).catch(() => {});"
+                    + "}"
+                    + "} catch (_) {}"
+                    + "return response;"
+                    + "};"
+                    + "}"
+                    + "if (!window.__toonLivreCollector) {"
                     + "window.__toonLivreCollector = setInterval(() => {"
                     + "const urls = ["
                     + "...performance.getEntriesByType('resource').map(entry => entry.name),"
                     + "...Array.from(document.images).map(image => image.currentSrc || image.src),"
                     + "];"
-                    + "window['"
-                    + bridgeName
-                    + "'].post(JSON.stringify(urls));"
+                    + "bridge.post(JSON.stringify(urls));"
                     + "}, 250);"
+                    + "}"
                     + "})();";
             view.evaluateJavascript(script, null);
           }
@@ -133,14 +151,32 @@ public class ReaderVerificationActivity extends Activity {
     setContentView(webView);
   }
 
-  private void addCandidate(String candidate) {
-    String cdnUrl = toCdnUrl(candidate);
-    if (cdnUrl == null) return;
-    synchronized (pages) {
-      if (!pages.add(cdnUrl)) return;
+  private void addCandidates(String value, boolean complete) {
+    boolean added = false;
+    try {
+      JSONArray values = new JSONArray(value);
+      for (int index = 0; index < values.length(); index++) {
+        added |= addCandidate(values.getString(index), !complete);
+      }
+    } catch (JSONException ignored) {
     }
-    handler.removeCallbacks(deliverPages);
-    handler.postDelayed(deliverPages, SETTLE_DELAY_MS);
+    if (complete && added) {
+      handler.removeCallbacks(deliverPages);
+      handler.post(deliverPages);
+    }
+  }
+
+  private boolean addCandidate(String candidate, boolean scheduleDelivery) {
+    String cdnUrl = toCdnUrl(candidate);
+    if (cdnUrl == null) return false;
+    synchronized (pages) {
+      if (!pages.add(cdnUrl)) return false;
+    }
+    if (scheduleDelivery) {
+      handler.removeCallbacks(deliverPages);
+      handler.postDelayed(deliverPages, SETTLE_DELAY_MS);
+    }
+    return true;
   }
 
   private String toCdnUrl(String candidate) {
