@@ -36,7 +36,7 @@ public class ReaderVerificationActivity extends Activity {
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
   private static final long COMPLETE_PAGE_LIST_DELAY_MS = 100L;
   private static final long SINGLE_PAGE_FALLBACK_DELAY_MS = 4_000L;
-  private static final long SETTLE_DELAY_MS = 1_000L;
+  private static final long SETTLE_DELAY_MS = 500L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
@@ -108,8 +108,12 @@ public class ReaderVerificationActivity extends Activity {
               Uri requestUrl = request.getUrl();
               if (SITE_HOST.equals(requestUrl.getHost())
                   && "/api/reader/chapter/access".equals(requestUrl.getPath())) {
-                if (chapterAccessRequests.incrementAndGet() == 2 && hasPages()) {
-                  scheduleDelivery(SINGLE_PAGE_FALLBACK_DELAY_MS);
+                if (chapterAccessRequests.incrementAndGet() == 2) {
+                  if (hasMultiplePages()) {
+                    scheduleDelivery(SETTLE_DELAY_MS);
+                  } else if (hasPages()) {
+                    scheduleDelivery(SINGLE_PAGE_FALLBACK_DELAY_MS);
+                  }
                 }
               }
               if (addCandidate(requestUrl.toString()) && canUseFallback()) {
@@ -224,6 +228,12 @@ public class ReaderVerificationActivity extends Activity {
   private boolean hasPages() {
     synchronized (pages) {
       return !pages.isEmpty();
+    }
+  }
+
+  private boolean hasMultiplePages() {
+    synchronized (pages) {
+      return pages.size() > 1;
     }
   }
 
