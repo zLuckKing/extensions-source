@@ -32,7 +32,7 @@ public class ReaderVerificationActivity extends Activity {
   private static final String SITE_HOST = "toonlivre.net";
   private static final String CDN_HOST = "cdn.toonlivre.net";
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
-  private static final long SETTLE_DELAY_MS = 1_000L;
+  private static final long SETTLE_DELAY_MS = 500L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
@@ -124,7 +124,7 @@ public class ReaderVerificationActivity extends Activity {
                     + "window['"
                     + bridgeName
                     + "'].post(JSON.stringify(urls));"
-                    + "}, 500);"
+                    + "}, 250);"
                     + "})();";
             view.evaluateJavascript(script, null);
           }
