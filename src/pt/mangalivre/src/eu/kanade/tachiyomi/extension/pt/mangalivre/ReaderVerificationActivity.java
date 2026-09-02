@@ -32,6 +32,7 @@ public class ReaderVerificationActivity extends Activity {
   private static final String SITE_HOST = "toonlivre.net";
   private static final String CDN_HOST = "cdn.toonlivre.net";
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
+  private static final long COMPLETE_PAGE_LIST_DELAY_MS = 100L;
   private static final long SETTLE_DELAY_MS = 500L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
@@ -85,12 +86,12 @@ public class ReaderVerificationActivity extends Activity {
         new Object() {
           @JavascriptInterface
           public void post(String value) {
-            addCandidates(value, false);
+            if (addCandidates(value)) scheduleDelivery(SETTLE_DELAY_MS);
           }
 
           @JavascriptInterface
           public void postPages(String value) {
-            addCandidates(value, true);
+            if (addCandidates(value)) scheduleDelivery(COMPLETE_PAGE_LIST_DELAY_MS);
           }
         },
         bridgeName);
@@ -100,7 +101,7 @@ public class ReaderVerificationActivity extends Activity {
           public WebResourceResponse shouldInterceptRequest(
               WebView view, WebResourceRequest request) {
             if (request != null && request.getUrl() != null) {
-              addCandidate(request.getUrl().toString(), true);
+              if (addCandidate(request.getUrl().toString())) scheduleDelivery(SETTLE_DELAY_MS);
             }
             return null;
           }
@@ -121,18 +122,20 @@ public class ReaderVerificationActivity extends Activity {
                     + "if (!window.__toonLivreFetchWrapped) {"
                     + "window.__toonLivreFetchWrapped = true;"
                     + "const originalFetch = window.fetch;"
-                    + "window.fetch = async function(...args) {"
-                    + "const response = await originalFetch.apply(this, args);"
+                    + "if (typeof originalFetch === 'function') {"
+                    + "window.fetch = function() {"
+                    + "return originalFetch.apply(this, arguments).then(response => {"
                     + "try {"
-                    + "const requestUrl = typeof args[0] === 'string' ? args[0] : args[0].url;"
-                    + "if (response.ok && new URL(requestUrl, location.href).pathname === '/api/reader/chapter/access') {"
+                    + "if (response.ok && new URL(response.url).pathname === '/api/reader/chapter/access') {"
                     + "response.clone().json().then(data => {"
                     + "if (Array.isArray(data?.chapter?.pages)) bridge.postPages(JSON.stringify(data.chapter.pages));"
                     + "}).catch(() => {});"
                     + "}"
                     + "} catch (_) {}"
                     + "return response;"
+                    + "});"
                     + "};"
+                    + "}"
                     + "}"
                     + "if (!window.__toonLivreCollector) {"
                     + "window.__toonLivreCollector = setInterval(() => {"
@@ -151,32 +154,29 @@ public class ReaderVerificationActivity extends Activity {
     setContentView(webView);
   }
 
-  private void addCandidates(String value, boolean complete) {
+  private boolean addCandidates(String value) {
     boolean added = false;
     try {
       JSONArray values = new JSONArray(value);
       for (int index = 0; index < values.length(); index++) {
-        added |= addCandidate(values.getString(index), !complete);
+        added |= addCandidate(values.getString(index));
       }
     } catch (JSONException ignored) {
     }
-    if (complete && added) {
-      handler.removeCallbacks(deliverPages);
-      handler.post(deliverPages);
-    }
+    return added;
   }
 
-  private boolean addCandidate(String candidate, boolean scheduleDelivery) {
+  private boolean addCandidate(String candidate) {
     String cdnUrl = toCdnUrl(candidate);
     if (cdnUrl == null) return false;
     synchronized (pages) {
-      if (!pages.add(cdnUrl)) return false;
+      return pages.add(cdnUrl);
     }
-    if (scheduleDelivery) {
-      handler.removeCallbacks(deliverPages);
-      handler.postDelayed(deliverPages, SETTLE_DELAY_MS);
-    }
-    return true;
+  }
+
+  private void scheduleDelivery(long delayMillis) {
+    handler.removeCallbacks(deliverPages);
+    handler.postDelayed(deliverPages, delayMillis);
   }
 
   private String toCdnUrl(String candidate) {
