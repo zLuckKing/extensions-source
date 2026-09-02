@@ -18,8 +18,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONArray;
 import org.json.JSONException;
+import org.json.JSONObject;
 
 public class ReaderVerificationActivity extends Activity {
   public static final String EXTRA_URL = "reader_url";
@@ -33,10 +35,12 @@ public class ReaderVerificationActivity extends Activity {
   private static final String CDN_HOST = "cdn.toonlivre.net";
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
   private static final long COMPLETE_PAGE_LIST_DELAY_MS = 100L;
-  private static final long SETTLE_DELAY_MS = 500L;
+  private static final long SINGLE_PAGE_FALLBACK_DELAY_MS = 4_000L;
+  private static final long SETTLE_DELAY_MS = 1_000L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
+  private final AtomicInteger chapterAccessRequests = new AtomicInteger();
   private ResultReceiver receiver;
   private String pathPrefix;
   private WebView webView;
@@ -86,12 +90,12 @@ public class ReaderVerificationActivity extends Activity {
         new Object() {
           @JavascriptInterface
           public void post(String value) {
-            if (addCandidates(value)) scheduleDelivery(SETTLE_DELAY_MS);
+            if (addCandidates(value) && canUseFallback()) scheduleDelivery(SETTLE_DELAY_MS);
           }
 
           @JavascriptInterface
           public void postPages(String value) {
-            if (addCandidates(value)) scheduleDelivery(COMPLETE_PAGE_LIST_DELAY_MS);
+            if (addCompletePageList(value)) scheduleDelivery(COMPLETE_PAGE_LIST_DELAY_MS);
           }
         },
         bridgeName);
@@ -101,7 +105,16 @@ public class ReaderVerificationActivity extends Activity {
           public WebResourceResponse shouldInterceptRequest(
               WebView view, WebResourceRequest request) {
             if (request != null && request.getUrl() != null) {
-              if (addCandidate(request.getUrl().toString())) scheduleDelivery(SETTLE_DELAY_MS);
+              Uri requestUrl = request.getUrl();
+              if (SITE_HOST.equals(requestUrl.getHost())
+                  && "/api/reader/chapter/access".equals(requestUrl.getPath())) {
+                if (chapterAccessRequests.incrementAndGet() == 2 && hasPages()) {
+                  scheduleDelivery(SINGLE_PAGE_FALLBACK_DELAY_MS);
+                }
+              }
+              if (addCandidate(requestUrl.toString()) && canUseFallback()) {
+                scheduleDelivery(SETTLE_DELAY_MS);
+              }
             }
             return null;
           }
@@ -128,7 +141,10 @@ public class ReaderVerificationActivity extends Activity {
                     + "try {"
                     + "if (response.ok && new URL(response.url).pathname === '/api/reader/chapter/access') {"
                     + "response.clone().json().then(data => {"
-                    + "if (Array.isArray(data?.chapter?.pages)) bridge.postPages(JSON.stringify(data.chapter.pages));"
+                    + "if (Array.isArray(data?.chapter?.pages)) bridge.postPages(JSON.stringify({"
+                    + "pages: data.chapter.pages,"
+                    + "pageCount: data.chapter.pageCount,"
+                    + "}));"
                     + "}).catch(() => {});"
                     + "}"
                     + "} catch (_) {}"
@@ -144,7 +160,7 @@ public class ReaderVerificationActivity extends Activity {
                     + "...Array.from(document.images).map(image => image.currentSrc || image.src),"
                     + "];"
                     + "bridge.post(JSON.stringify(urls));"
-                    + "}, 250);"
+                    + "}, 500);"
                     + "}"
                     + "})();";
             view.evaluateJavascript(script, null);
@@ -166,6 +182,28 @@ public class ReaderVerificationActivity extends Activity {
     return added;
   }
 
+  private boolean addCompletePageList(String value) {
+    try {
+      JSONObject payload = new JSONObject(value);
+      JSONArray values = payload.getJSONArray("pages");
+      int pageCount = payload.getInt("pageCount");
+      if (pageCount <= 0 || values.length() != pageCount) return false;
+
+      ArrayList<String> completePages = new ArrayList<>(pageCount);
+      for (int index = 0; index < values.length(); index++) {
+        String cdnUrl = toCdnUrl(values.getString(index));
+        if (cdnUrl == null || completePages.contains(cdnUrl)) return false;
+        completePages.add(cdnUrl);
+      }
+      synchronized (pages) {
+        pages.addAll(completePages);
+      }
+      return true;
+    } catch (JSONException ignored) {
+      return false;
+    }
+  }
+
   private boolean addCandidate(String candidate) {
     String cdnUrl = toCdnUrl(candidate);
     if (cdnUrl == null) return false;
@@ -177,6 +215,16 @@ public class ReaderVerificationActivity extends Activity {
   private void scheduleDelivery(long delayMillis) {
     handler.removeCallbacks(deliverPages);
     handler.postDelayed(deliverPages, delayMillis);
+  }
+
+  private boolean canUseFallback() {
+    return chapterAccessRequests.get() >= 2;
+  }
+
+  private boolean hasPages() {
+    synchronized (pages) {
+      return !pages.isEmpty();
+    }
   }
 
   private String toCdnUrl(String candidate) {
