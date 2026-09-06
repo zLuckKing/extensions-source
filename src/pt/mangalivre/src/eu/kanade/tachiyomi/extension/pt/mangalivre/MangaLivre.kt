@@ -56,6 +56,8 @@ abstract class MangaLivre :
     private val pageCache = LruCache<String, List<Page>>(PAGE_CACHE_SIZE)
     private var lastVerifiedChapterId: String? = null
     private var suppressVerificationUntil = 0L
+    private var pendingVerificationChapterId: String? = null
+    private var pendingVerificationSince = 0L
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Accept", "*/*")
         .set("Accept-Language", "pt-BR,en-US;q=0.9,en;q=0.8")
@@ -172,11 +174,11 @@ abstract class MangaLivre :
             if (shouldSuppressVerification(ref.chapterId)) throw IOException(READER_VERIFICATION_REQUIRED)
 
             val verifiedPages = openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
-            val pageList = fetchPageListWithRetry(ref, chapterNumber, retryVerificationRequired = true)
-                ?: verifiedPages.toPageList(ref.mangaId, chapterNumber)
+            val pageList = verifiedPages.toPageList(ref.mangaId, chapterNumber)
             if (pageList.isEmpty()) throw IOException(READER_VERIFICATION_REQUIRED)
             lastVerifiedChapterId = ref.chapterId
             suppressVerificationUntil = SystemClock.elapsedRealtime() + PREFETCH_SUPPRESSION_WINDOW.inWholeMilliseconds
+            pendingVerificationChapterId = null
             return pageList.also { pageCache.put(ref.chapterId, it) }
         } finally {
             verificationMutex.unlock()
@@ -203,8 +205,18 @@ abstract class MangaLivre :
         return null
     }
 
-    private fun shouldSuppressVerification(chapterId: String): Boolean =
-        lastVerifiedChapterId != chapterId && SystemClock.elapsedRealtime() < suppressVerificationUntil
+    private fun shouldSuppressVerification(chapterId: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (lastVerifiedChapterId == chapterId || now >= suppressVerificationUntil) return false
+
+        if (pendingVerificationChapterId == chapterId) {
+            return now - pendingVerificationSince < PREFETCH_CONFIRMATION_DELAY.inWholeMilliseconds
+        }
+
+        pendingVerificationChapterId = chapterId
+        pendingVerificationSince = now
+        return true
+    }
 
     private suspend fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
         client.post(
@@ -309,7 +321,8 @@ abstract class MangaLivre :
     companion object {
         private val VERIFICATION_TIMEOUT = 2.minutes
         private val READER_ACCESS_RETRY_DELAY = 500.milliseconds
-        private val PREFETCH_SUPPRESSION_WINDOW = 5.seconds
+        private val PREFETCH_SUPPRESSION_WINDOW = 10.minutes
+        private val PREFETCH_CONFIRMATION_DELAY = 1.seconds
         private const val READER_ACCESS_ATTEMPTS = 10
         private const val PAGE_CACHE_SIZE = 20
         private const val EXTENSION_PACKAGE = "eu.kanade.tachiyomi.extension.pt.mangalivre"
