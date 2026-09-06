@@ -6,6 +6,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
+import android.os.SystemClock
+import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -26,6 +28,7 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -36,6 +39,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.io.IOException
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
@@ -49,6 +53,9 @@ abstract class MangaLivre :
 
     private val preferences by getPreferencesLazy()
     private val verificationMutex = Mutex()
+    private val pageCache = LruCache<String, List<Page>>(PAGE_CACHE_SIZE)
+    private var lastVerifiedChapterId: String? = null
+    private var suppressVerificationUntil = 0L
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Accept", "*/*")
         .set("Accept-Language", "pt-BR,en-US;q=0.9,en;q=0.8")
@@ -140,15 +147,63 @@ abstract class MangaLivre :
         val ref = chapter.memo.parseAs<ChapterReferenceDto>()
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
 
-        return verificationMutex.withLock {
-            fetchReaderAccess(ref)?.let { access ->
-                return@withLock access.chapter.pages.toPageList(ref.mangaId, chapterNumber)
+        pageCache.get(ref.chapterId)?.let { return it }
+
+        if (!verificationMutex.tryLock()) {
+            verificationMutex.withLock {}
+            pageCache.get(ref.chapterId)?.let { return it }
+
+            val pageList = fetchPageListWithRetry(
+                ref,
+                chapterNumber,
+                retryVerificationRequired = false,
+            )
+                ?: throw IOException(READER_VERIFICATION_REQUIRED)
+            return pageList.also { pageCache.put(ref.chapterId, it) }
+        }
+
+        try {
+            pageCache.get(ref.chapterId)?.let { return it }
+
+            fetchPageListWithRetry(ref, chapterNumber, retryVerificationRequired = false)?.let { pageList ->
+                return pageList.also { pageCache.put(ref.chapterId, it) }
             }
 
+            if (shouldSuppressVerification(ref.chapterId)) throw IOException(READER_VERIFICATION_REQUIRED)
+
             openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
-                .toPageList(ref.mangaId, chapterNumber)
+            val pageList = fetchPageListWithRetry(ref, chapterNumber, retryVerificationRequired = true)
+                ?: throw IOException(READER_VERIFICATION_REQUIRED)
+            lastVerifiedChapterId = ref.chapterId
+            suppressVerificationUntil = SystemClock.elapsedRealtime() + PREFETCH_SUPPRESSION_WINDOW.inWholeMilliseconds
+            return pageList.also { pageCache.put(ref.chapterId, it) }
+        } finally {
+            verificationMutex.unlock()
         }
     }
+
+    private suspend fun fetchPageListWithRetry(
+        ref: ChapterReferenceDto,
+        chapterNumber: String,
+        retryVerificationRequired: Boolean,
+    ): List<Page>? {
+        var lastError: IOException? = null
+        repeat(READER_ACCESS_ATTEMPTS) { attempt ->
+            try {
+                fetchReaderAccess(ref)?.let { return it.toValidatedPageList(ref.mangaId, chapterNumber) }
+                if (!retryVerificationRequired) return null
+            } catch (error: IOException) {
+                lastError = error
+            }
+
+            if (attempt < READER_ACCESS_ATTEMPTS - 1) delay(READER_ACCESS_RETRY_DELAY)
+        }
+        lastError?.let { throw it }
+        return null
+    }
+
+    private fun shouldSuppressVerification(chapterId: String): Boolean =
+        lastVerifiedChapterId != chapterId && SystemClock.elapsedRealtime() < suppressVerificationUntil
 
     private suspend fun fetchReaderAccess(ref: ChapterReferenceDto): ReaderAccessResponseDto? {
         client.post(
@@ -252,6 +307,10 @@ abstract class MangaLivre :
 
     companion object {
         private val VERIFICATION_TIMEOUT = 2.minutes
+        private val READER_ACCESS_RETRY_DELAY = 500.milliseconds
+        private val PREFETCH_SUPPRESSION_WINDOW = 5.seconds
+        private const val READER_ACCESS_ATTEMPTS = 10
+        private const val PAGE_CACHE_SIZE = 20
         private const val EXTENSION_PACKAGE = "eu.kanade.tachiyomi.extension.pt.mangalivre"
         private const val CDN_HOST = "cdn.toonlivre.net"
         private const val PROXY_HOST = "slightly-free-mayfly.edgecompute.app"
@@ -308,6 +367,17 @@ abstract class MangaLivre :
                 .sortedWith(compareBy<String>({ it.pageNumber() ?: Int.MAX_VALUE }, { it }))
                 .toList()
         return sortedUrls.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
+    }
+
+    private fun ReaderAccessResponseDto.toValidatedPageList(
+        mangaId: String,
+        chapterNumber: String,
+    ): List<Page> {
+        val pageList = chapter.pages.toPageList(mangaId, chapterNumber)
+        if (chapter.pageCount <= 0 || chapter.pages.size != chapter.pageCount || pageList.size != chapter.pageCount) {
+            throw IOException("Incomplete chapter page list")
+        }
+        return pageList
     }
 
     private fun String.pageNumber(): Int? = toHttpUrl()

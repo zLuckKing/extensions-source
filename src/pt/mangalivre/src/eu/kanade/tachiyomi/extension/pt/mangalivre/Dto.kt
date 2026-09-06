@@ -94,6 +94,7 @@ class ReaderAccessResponseDto(
 
 @Serializable
 class ReaderChapterDto(
+    val pageCount: Int,
     val pages: List<String>,
 )
 
