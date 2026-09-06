@@ -171,9 +171,10 @@ abstract class MangaLivre :
 
             if (shouldSuppressVerification(ref.chapterId)) throw IOException(READER_VERIFICATION_REQUIRED)
 
-            openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
+            val verifiedPages = openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
             val pageList = fetchPageListWithRetry(ref, chapterNumber, retryVerificationRequired = true)
-                ?: throw IOException(READER_VERIFICATION_REQUIRED)
+                ?: verifiedPages.toPageList(ref.mangaId, chapterNumber)
+            if (pageList.isEmpty()) throw IOException(READER_VERIFICATION_REQUIRED)
             lastVerifiedChapterId = ref.chapterId
             suppressVerificationUntil = SystemClock.elapsedRealtime() + PREFETCH_SUPPRESSION_WINDOW.inWholeMilliseconds
             return pageList.also { pageCache.put(ref.chapterId, it) }

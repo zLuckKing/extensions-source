@@ -36,7 +36,7 @@ public class ReaderVerificationActivity extends Activity {
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
   private static final long COMPLETE_PAGE_LIST_DELAY_MS = 100L;
   private static final long SINGLE_PAGE_FALLBACK_DELAY_MS = 4_000L;
-  private static final long SETTLE_DELAY_MS = 500L;
+  private static final long SETTLE_DELAY_MS = 4_000L;
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
