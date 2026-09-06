@@ -22,11 +22,9 @@ import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.WebViewTimeoutException
 import keiyoushi.utils.applicationContext
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.runWebView
 import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -40,8 +38,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.io.IOException
-import java.util.Collections
-import java.util.LinkedHashSet
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -174,10 +170,6 @@ abstract class MangaLivre :
                 return pageList.also { pageCache.put(ref.chapterId, it) }
             }
 
-            runHiddenWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)?.let { pageList ->
-                return pageList.also { pageCache.put(ref.chapterId, it) }
-            }
-
             if (isPreload) throw IOException(READER_VERIFICATION_REQUIRED)
 
             val verifiedPages = openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
@@ -186,49 +178,6 @@ abstract class MangaLivre :
             return pageList.also { pageCache.put(ref.chapterId, it) }
         } finally {
             verificationMutex.unlock()
-        }
-    }
-
-    private suspend fun runHiddenWebView(
-        readerUrl: String,
-        mangaId: String,
-        chapterNumber: String,
-    ): List<Page>? {
-        val imageUrls = Collections.synchronizedSet(LinkedHashSet<String>())
-        val bridgeName = "toonLivre${System.nanoTime()}"
-        val script = collectImageUrlsScript(bridgeName)
-
-        fun collect(rawUrl: String) {
-            val imageUrl = rawUrl.toCdnImageUrl() ?: return
-            if (imageUrl.isChapterImage(mangaId, chapterNumber)) imageUrls.add(imageUrl)
-        }
-
-        return try {
-            runWebView(timeout = HIDDEN_WEBVIEW_TIMEOUT) {
-                var previousCount = 0
-                var stablePolls = 0
-
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                interceptRequest { request ->
-                    collect(request.url.toString())
-                    null
-                }
-                jsBridge(bridgeName) { payload -> payload.parseAs<List<String>>().forEach(::collect) }
-                onPageFinished { evaluateJs(script) }
-                poll(1.seconds) {
-                    evaluateJs(script)
-                    val currentCount = imageUrls.size
-                    stablePolls = if (currentCount > 0 && currentCount == previousCount) stablePolls + 1 else 0
-                    previousCount = currentCount
-                    if (stablePolls >= HIDDEN_WEBVIEW_STABLE_POLLS) {
-                        resolve(imageUrls.toList().toPageList(mangaId, chapterNumber))
-                    }
-                }
-                loadUrl(readerUrl)
-            }.takeIf { it.isNotEmpty() }
-        } catch (_: WebViewTimeoutException) {
-            null
         }
     }
 
@@ -261,7 +210,12 @@ abstract class MangaLivre :
             if (response.isSuccessful) return response.parseAs()
 
             val error = response.parseAs<ReaderAccessErrorDto>()
-            if (response.code == 403 && error.error == READER_VERIFICATION_REQUIRED) return null
+            if (
+                (response.code == 403 && error.error == READER_VERIFICATION_REQUIRED) ||
+                (response.code == 429 && error.error == INTERACTIVE_VERIFICATION_IN_PROGRESS)
+            ) {
+                return null
+            }
             throw IOException(error.error)
         }
     }
@@ -355,8 +309,6 @@ abstract class MangaLivre :
     companion object {
         private val VERIFICATION_TIMEOUT = 2.minutes
         private val READER_ACCESS_RETRY_DELAY = 500.milliseconds
-        private val HIDDEN_WEBVIEW_TIMEOUT = 10.seconds
-        private const val HIDDEN_WEBVIEW_STABLE_POLLS = 3
         private const val READER_ACCESS_ATTEMPTS = 10
         private const val PAGE_CACHE_SIZE = 20
         private const val EXTENSION_PACKAGE = "eu.kanade.tachiyomi.extension.pt.mangalivre"
@@ -369,6 +321,7 @@ abstract class MangaLivre :
         private const val NON_JSON_MESSAGE =
             "Resposta não-JSON (Cloudflare ou header desatualizado). Abra a fonte na WebView do app e tente de novo."
         private const val READER_VERIFICATION_REQUIRED = "Reader verification required"
+        private const val INTERACTIVE_VERIFICATION_IN_PROGRESS = "Interactive verification already in progress"
         private const val READER_VIEW_MODEL_CLASS = "eu.kanade.tachiyomi.ui.reader.ReaderViewModel"
 
         private const val SORT_POPULAR = "popular"
@@ -379,20 +332,6 @@ abstract class MangaLivre :
         private const val DIRECTION_DESC = "desc"
         private const val DIRECTION_ASC = "asc"
     }
-
-    private fun collectImageUrlsScript(bridgeName: String) =
-        """
-        (() => {
-            const urls = new Set();
-            document.querySelectorAll('img').forEach((image) => {
-                [image.currentSrc, image.src, image.dataset.src].forEach((url) => {
-                    if (url) urls.add(url);
-                });
-            });
-            performance.getEntriesByType('resource').forEach((entry) => urls.add(entry.name));
-            $bridgeName.post(JSON.stringify(Array.from(urls)));
-        })();
-        """.trimIndent()
 
     private fun String.toCdnImageUrl(): String? {
         val url = toHttpUrlOrNull() ?: return null
