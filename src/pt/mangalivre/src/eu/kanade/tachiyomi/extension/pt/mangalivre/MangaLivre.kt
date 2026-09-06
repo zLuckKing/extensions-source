@@ -36,8 +36,10 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
+import java.util.Collections
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -53,6 +55,10 @@ abstract class MangaLivre :
     private val preferences by getPreferencesLazy()
     private val verificationMutex = Mutex()
     private val pageCache = LruCache<String, List<Page>>(PAGE_CACHE_SIZE)
+    private val lastPageUrls = Collections.synchronizedSet(mutableSetOf<String>())
+    private val readerStateLock = Any()
+    private var currentImageChapterKey: String? = null
+    private var boundaryReachedChapterKey: String? = null
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Accept", "*/*")
         .set("Accept-Language", "pt-BR,en-US;q=0.9,en;q=0.8")
@@ -149,6 +155,9 @@ abstract class MangaLivre :
         }
 
         pageCache.get(ref.chapterId)?.let { return it }
+        if (isPreload && !canVerifyPreload(ref.mangaId, chapterNumber)) {
+            throw IOException(READER_VERIFICATION_REQUIRED)
+        }
 
         if (!verificationMutex.tryLock()) {
             verificationMutex.withLock {}
@@ -160,14 +169,14 @@ abstract class MangaLivre :
                 retryVerificationRequired = false,
             )
                 ?: throw IOException(READER_VERIFICATION_REQUIRED)
-            return pageList.also { pageCache.put(ref.chapterId, it) }
+            return cachePageList(ref.chapterId, pageList)
         }
 
         try {
             pageCache.get(ref.chapterId)?.let { return it }
 
             fetchPageListWithRetry(ref, chapterNumber, retryVerificationRequired = false)?.let { pageList ->
-                return pageList.also { pageCache.put(ref.chapterId, it) }
+                return cachePageList(ref.chapterId, pageList)
             }
 
             if (isPreload) throw IOException(READER_VERIFICATION_REQUIRED)
@@ -175,10 +184,42 @@ abstract class MangaLivre :
             val verifiedPages = openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
             val pageList = verifiedPages.toPageList(ref.mangaId, chapterNumber)
             if (pageList.isEmpty()) throw IOException(READER_VERIFICATION_REQUIRED)
-            return pageList.also { pageCache.put(ref.chapterId, it) }
+            return cachePageList(ref.chapterId, pageList)
         } finally {
             verificationMutex.unlock()
         }
+    }
+
+    override fun imageRequest(page: Page): Request {
+        val imageUrl = page.imageUrl
+        val chapterKey = imageUrl?.chapterKey()
+        if (chapterKey != null) {
+            synchronized(readerStateLock) {
+                if (currentImageChapterKey != chapterKey) {
+                    currentImageChapterKey = chapterKey
+                    boundaryReachedChapterKey = null
+                }
+                if (lastPageUrls.contains(imageUrl)) boundaryReachedChapterKey = chapterKey
+            }
+        }
+        return super.imageRequest(page)
+    }
+
+    private fun canVerifyPreload(
+        mangaId: String,
+        chapterNumber: String,
+    ): Boolean = synchronized(readerStateLock) {
+        val currentKey = "$mangaId/$chapterNumber"
+        boundaryReachedChapterKey?.startsWith("$mangaId/") == true && boundaryReachedChapterKey != currentKey
+    }
+
+    private fun cachePageList(
+        chapterId: String,
+        pageList: List<Page>,
+    ): List<Page> {
+        pageList.lastOrNull()?.imageUrl?.let(lastPageUrls::add)
+        pageCache.put(chapterId, pageList)
+        return pageList
     }
 
     private suspend fun fetchPageListWithRetry(
@@ -389,4 +430,10 @@ abstract class MangaLivre :
         ?.groupValues
         ?.get(1)
         ?.toIntOrNull()
+
+    private fun String.chapterKey(): String? {
+        val segments = toHttpUrlOrNull()?.pathSegments ?: return null
+        if (segments.size < 4 || segments[0] != "obras") return null
+        return "${segments[1]}/${segments[2]}"
+    }
 }
