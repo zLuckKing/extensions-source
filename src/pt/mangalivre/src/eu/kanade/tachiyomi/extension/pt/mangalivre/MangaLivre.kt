@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
 import android.os.SystemClock
+import android.util.Log
 import android.util.LruCache
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
@@ -148,6 +149,15 @@ abstract class MangaLivre :
         val chapterUrl = "$baseUrl${chapter.url}".toHttpUrl()
         val ref = chapter.memo.parseAs<ChapterReferenceDto>()
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
+
+        Log.d(
+            READER_LOG_TAG,
+            "chapter=$chapterNumber callers=" +
+                Throwable().stackTrace
+                    .drop(1)
+                    .take(STACK_TRACE_FRAME_LIMIT)
+                    .joinToString(" <- ") { "${it.className}.${it.methodName}" },
+        )
 
         pageCache.get(ref.chapterId)?.let { return it }
 
@@ -335,6 +345,8 @@ abstract class MangaLivre :
         private const val NON_JSON_MESSAGE =
             "Resposta não-JSON (Cloudflare ou header desatualizado). Abra a fonte na WebView do app e tente de novo."
         private const val READER_VERIFICATION_REQUIRED = "Reader verification required"
+        private const val READER_LOG_TAG = "TOONLIVRE_READER"
+        private const val STACK_TRACE_FRAME_LIMIT = 30
 
         private const val SORT_POPULAR = "popular"
         private const val SORT_RELEASE = "release"
