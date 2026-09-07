@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.ResultReceiver;
 import android.view.ViewGroup;
+import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -30,11 +31,13 @@ public class ReaderVerificationActivity extends Activity {
   public static final String EXTRA_CHAPTER_NUMBER = "chapter_number";
   public static final String EXTRA_RECEIVER = "result_receiver";
   public static final String EXTRA_PAGES = "pages";
+  public static final String EXTRA_READER_GRANT = "reader_grant";
   public static final int RESULT_PAGES = 1;
 
   private static final String SITE_HOST = "toonlivre.net";
   private static final String CDN_HOST = "cdn.toonlivre.net";
   private static final String PROXY_HOST = "slightly-free-mayfly.edgecompute.app";
+  private static final String READER_GRANT_COOKIE = "__Secure-tl_anon_grant";
   private static final long COMPLETE_PAGE_LIST_DELAY_MS = 100L;
   private static final long SINGLE_PAGE_FALLBACK_DELAY_MS = 4_000L;
   private static final long SETTLE_DELAY_MS = 4_000L;
@@ -59,9 +62,24 @@ public class ReaderVerificationActivity extends Activity {
         delivered = true;
         Bundle bundle = new Bundle();
         bundle.putStringArrayList(EXTRA_PAGES, result);
+        String readerGrant = getReaderGrant();
+        if (readerGrant != null) bundle.putString(EXTRA_READER_GRANT, readerGrant);
         receiver.send(RESULT_PAGES, bundle);
         finish();
       };
+
+  private String getReaderGrant() {
+    String cookies = CookieManager.getInstance().getCookie("https://toonlivre.net/api/reader");
+    if (cookies == null) return null;
+    String prefix = READER_GRANT_COOKIE + "=";
+    for (String cookie : cookies.split(";")) {
+      String value = cookie.trim();
+      if (value.startsWith(prefix) && value.length() > prefix.length()) {
+        return value.substring(prefix.length());
+      }
+    }
+    return null;
+  }
 
   @SuppressWarnings("deprecation")
   @SuppressLint("SetJavaScriptEnabled")

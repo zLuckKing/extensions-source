@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
 import android.util.LruCache
-import android.webkit.CookieManager
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -240,6 +239,8 @@ abstract class MangaLivre :
                 ) {
                     val pages = resultData?.getStringArrayList(ReaderVerificationActivity.EXTRA_PAGES).orEmpty()
                     if (resultCode == ReaderVerificationActivity.RESULT_PAGES && pages.isNotEmpty()) {
+                        resultData?.getString(ReaderVerificationActivity.EXTRA_READER_GRANT)
+                            ?.let(::syncReaderGrantCookie)
                         result.complete(pages)
                     } else {
                         result.completeExceptionally(IOException("Verificação cancelada."))
@@ -257,20 +258,10 @@ abstract class MangaLivre :
             }
         applicationContext.startActivity(intent)
         return withTimeout(VERIFICATION_TIMEOUT) { result.await() }
-            .also { syncReaderGrantCookie() }
     }
 
-    private fun syncReaderGrantCookie() {
+    private fun syncReaderGrantCookie(grant: String) {
         val url = "$apiUrl/reader".toHttpUrl()
-        val grant = CookieManager.getInstance()
-            .getCookie(url.toString())
-            ?.split(';')
-            ?.map(String::trim)
-            ?.firstOrNull { it.startsWith("$READER_GRANT_COOKIE=") }
-            ?.substringAfter('=')
-            ?.takeIf(String::isNotEmpty)
-            ?: return
-
         val cookie = Cookie.Builder()
             .name(READER_GRANT_COOKIE)
             .value(grant)
