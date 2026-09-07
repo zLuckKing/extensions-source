@@ -90,12 +90,13 @@ class ChapterReferenceDto(
 @Serializable
 class ReaderAccessResponseDto(
     val chapter: ReaderChapterDto,
+    val protectedPages: Boolean = false,
 )
 
 @Serializable
 class ReaderChapterDto(
     val pageCount: Int,
-    val pages: List<String>,
+    val pages: List<String> = emptyList(),
 )
 
 @Serializable

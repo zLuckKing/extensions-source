@@ -209,7 +209,10 @@ abstract class MangaLivre :
             body = ref.toJsonRequestBody(),
             ensureSuccess = false,
         ).use { response ->
-            if (response.isSuccessful) return response.parseAs()
+            if (response.isSuccessful) {
+                val access = response.parseAs<ReaderAccessResponseDto>()
+                return access.takeUnless { it.protectedPages }
+            }
 
             val error = response.parseAs<ReaderAccessErrorDto>()
             if (

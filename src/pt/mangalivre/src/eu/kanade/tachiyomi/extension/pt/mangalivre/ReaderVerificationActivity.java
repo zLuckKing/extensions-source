@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -41,6 +42,7 @@ public class ReaderVerificationActivity extends Activity {
   private final Handler handler = new Handler(Looper.getMainLooper());
   private final Set<String> pages = new LinkedHashSet<>();
   private final AtomicInteger chapterAccessRequests = new AtomicInteger();
+  private final AtomicBoolean protectedPages = new AtomicBoolean();
   private ResultReceiver receiver;
   private String pathPrefix;
   private WebView webView;
@@ -97,6 +99,12 @@ public class ReaderVerificationActivity extends Activity {
           public void postPages(String value) {
             if (addCompletePageList(value)) scheduleDelivery(COMPLETE_PAGE_LIST_DELAY_MS);
           }
+
+          @JavascriptInterface
+          public void protectedPages() {
+            protectedPages.set(true);
+            handler.removeCallbacks(deliverPages);
+          }
         },
         bridgeName);
     webView.setWebViewClient(
@@ -141,15 +149,32 @@ public class ReaderVerificationActivity extends Activity {
                     + "const originalFetch = window.fetch;"
                     + "if (typeof originalFetch === 'function') {"
                     + "window.fetch = function() {"
-                    + "return originalFetch.apply(this, arguments).then(response => {"
+                    + "return originalFetch.apply(this, arguments).then(async response => {"
                     + "try {"
                     + "if (response.ok && new URL(response.url).pathname === '/api/reader/chapter/access') {"
-                    + "response.clone().json().then(data => {"
-                    + "if (Array.isArray(data?.chapter?.pages)) bridge.postPages(JSON.stringify({"
-                    + "pages: data.chapter.pages,"
-                    + "pageCount: data.chapter.pageCount,"
-                    + "}));"
-                    + "}).catch(() => {});"
+                    + "const data = await response.clone().json();"
+                    + "if (data?.protectedPages === true && data?.firstHandle?.token) {"
+                    + "bridge.protectedPages();"
+                    + "const pageCount = Number(data.pageCount || data.chapter?.pageCount || data.firstHandle.pageCount);"
+                    + "const collected = [];"
+                    + "const seen = new Set();"
+                    + "let handle = data.firstHandle;"
+                    + "while (handle?.token && collected.length < pageCount) {"
+                    + "const token = String(handle.token);"
+                    + "if (seen.has(token)) throw new Error('Repeated reader page handle');"
+                    + "seen.add(token);"
+                    + "const pageResponse = await originalFetch.call(window, '/api/reader/p/' + encodeURIComponent(token), {cache: 'no-store'});"
+                    + "if (!pageResponse.ok) throw new Error('Unable to load protected reader page');"
+                    + "const page = await pageResponse.json();"
+                    + "const pageNumber = Number(page?.pageNumber);"
+                    + "if (page?.directImage !== true || typeof page?.imageUrl !== 'string' || pageNumber !== collected.length + 1 || Number(page?.pageCount) !== pageCount) throw new Error('Invalid protected reader page');"
+                    + "collected.push(page.imageUrl);"
+                    + "handle = page.nextHandle;"
+                    + "}"
+                    + "if (collected.length === pageCount) bridge.postPages(JSON.stringify({pages: collected, pageCount}));"
+                    + "} else if (Array.isArray(data?.chapter?.pages)) {"
+                    + "bridge.postPages(JSON.stringify({pages: data.chapter.pages, pageCount: data.chapter.pageCount}));"
+                    + "}"
                     + "}"
                     + "} catch (_) {}"
                     + "return response;"
@@ -222,7 +247,7 @@ public class ReaderVerificationActivity extends Activity {
   }
 
   private boolean canUseFallback() {
-    return chapterAccessRequests.get() >= 2;
+    return !protectedPages.get() && chapterAccessRequests.get() >= 2;
   }
 
   private boolean hasPages() {
