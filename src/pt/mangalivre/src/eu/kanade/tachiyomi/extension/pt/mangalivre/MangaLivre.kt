@@ -36,10 +36,8 @@ import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
-import java.util.Collections
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
@@ -55,10 +53,6 @@ abstract class MangaLivre :
     private val preferences by getPreferencesLazy()
     private val verificationMutex = Mutex()
     private val pageCache = LruCache<String, List<Page>>(PAGE_CACHE_SIZE)
-    private val lastPageUrls = Collections.synchronizedSet(mutableSetOf<String>())
-    private val readerStateLock = Any()
-    private var currentImageChapterKey: String? = null
-    private var boundaryReachedChapterKey: String? = null
 
     override fun Headers.Builder.configureHeaders(): Headers.Builder = set("Accept", "*/*")
         .set("Accept-Language", "pt-BR,en-US;q=0.9,en;q=0.8")
@@ -150,14 +144,7 @@ abstract class MangaLivre :
         val ref = chapter.memo.parseAs<ChapterReferenceDto>()
         val chapterNumber = chapterUrl.pathSegments.last { it.isNotEmpty() }
 
-        val isPreload = Throwable().stackTrace.any {
-            it.className == READER_VIEW_MODEL_CLASS && it.methodName == "preload"
-        }
-
         pageCache.get(ref.chapterId)?.let { return it }
-        if (isPreload && !canVerifyPreload(ref.mangaId, chapterNumber)) {
-            throw IOException(READER_VERIFICATION_REQUIRED)
-        }
 
         if (!verificationMutex.tryLock()) {
             verificationMutex.withLock {}
@@ -179,8 +166,6 @@ abstract class MangaLivre :
                 return cachePageList(ref.chapterId, pageList)
             }
 
-            if (isPreload) throw IOException(READER_VERIFICATION_REQUIRED)
-
             val verifiedPages = openVerificationWebView(chapterUrl.toString(), ref.mangaId, chapterNumber)
             val pageList = verifiedPages.toPageList(ref.mangaId, chapterNumber)
             if (pageList.isEmpty()) throw IOException(READER_VERIFICATION_REQUIRED)
@@ -190,34 +175,10 @@ abstract class MangaLivre :
         }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imageUrl = page.imageUrl
-        val chapterKey = imageUrl?.chapterKey()
-        if (chapterKey != null) {
-            synchronized(readerStateLock) {
-                if (currentImageChapterKey != chapterKey) {
-                    currentImageChapterKey = chapterKey
-                    boundaryReachedChapterKey = null
-                }
-                if (lastPageUrls.contains(imageUrl)) boundaryReachedChapterKey = chapterKey
-            }
-        }
-        return super.imageRequest(page)
-    }
-
-    private fun canVerifyPreload(
-        mangaId: String,
-        chapterNumber: String,
-    ): Boolean = synchronized(readerStateLock) {
-        val currentKey = "$mangaId/$chapterNumber"
-        boundaryReachedChapterKey?.startsWith("$mangaId/") == true && boundaryReachedChapterKey != currentKey
-    }
-
     private fun cachePageList(
         chapterId: String,
         pageList: List<Page>,
     ): List<Page> {
-        pageList.lastOrNull()?.imageUrl?.let(lastPageUrls::add)
         pageCache.put(chapterId, pageList)
         return pageList
     }
@@ -363,7 +324,6 @@ abstract class MangaLivre :
             "Resposta não-JSON (Cloudflare ou header desatualizado). Abra a fonte na WebView do app e tente de novo."
         private const val READER_VERIFICATION_REQUIRED = "Reader verification required"
         private const val INTERACTIVE_VERIFICATION_IN_PROGRESS = "Interactive verification already in progress"
-        private const val READER_VIEW_MODEL_CLASS = "eu.kanade.tachiyomi.ui.reader.ReaderViewModel"
 
         private const val SORT_POPULAR = "popular"
         private const val SORT_RELEASE = "release"
@@ -431,9 +391,4 @@ abstract class MangaLivre :
         ?.get(1)
         ?.toIntOrNull()
 
-    private fun String.chapterKey(): String? {
-        val segments = toHttpUrlOrNull()?.pathSegments ?: return null
-        if (segments.size < 4 || segments[0] != "obras") return null
-        return "${segments[1]}/${segments[2]}"
-    }
 }
