@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ResultReceiver
 import android.util.LruCache
+import android.webkit.CookieManager
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -32,6 +33,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonElement
+import okhttp3.Cookie
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -191,7 +193,7 @@ abstract class MangaLivre :
         var lastError: IOException? = null
         repeat(READER_ACCESS_ATTEMPTS) { attempt ->
             try {
-                fetchReaderAccess(ref)?.let { return it.toValidatedPageList(ref.mangaId, chapterNumber) }
+                fetchReaderAccess(ref)?.let { return resolvePageList(it, ref.mangaId, chapterNumber) }
                 if (!retryVerificationRequired) return null
             } catch (error: IOException) {
                 lastError = error
@@ -210,8 +212,7 @@ abstract class MangaLivre :
             ensureSuccess = false,
         ).use { response ->
             if (response.isSuccessful) {
-                val access = response.parseAs<ReaderAccessResponseDto>()
-                return access.takeUnless { it.protectedPages }
+                return response.parseAs<ReaderAccessResponseDto>()
             }
 
             val error = response.parseAs<ReaderAccessErrorDto>()
@@ -256,6 +257,69 @@ abstract class MangaLivre :
             }
         applicationContext.startActivity(intent)
         return withTimeout(VERIFICATION_TIMEOUT) { result.await() }
+            .also { syncReaderGrantCookie() }
+    }
+
+    private fun syncReaderGrantCookie() {
+        val url = "$apiUrl/reader".toHttpUrl()
+        val grant = CookieManager.getInstance()
+            .getCookie(url.toString())
+            ?.split(';')
+            ?.map(String::trim)
+            ?.firstOrNull { it.startsWith("$READER_GRANT_COOKIE=") }
+            ?.substringAfter('=')
+            ?.takeIf(String::isNotEmpty)
+            ?: return
+
+        val cookie = Cookie.Builder()
+            .name(READER_GRANT_COOKIE)
+            .value(grant)
+            .hostOnlyDomain(url.host)
+            .path("/api/reader")
+            .secure()
+            .httpOnly()
+            .build()
+        client.cookieJar.saveFromResponse(url, listOf(cookie))
+    }
+
+    private suspend fun resolvePageList(
+        access: ReaderAccessResponseDto,
+        mangaId: String,
+        chapterNumber: String,
+    ): List<Page> {
+        if (!access.protectedPages) return access.toValidatedPageList(mangaId, chapterNumber)
+
+        val expectedCount = access.pageCount.takeIf { it > 0 } ?: access.chapter.pageCount
+        var handle = access.firstHandle ?: throw IOException("Missing first reader page handle")
+        val seenHandles = mutableSetOf<String>()
+        val imageUrls = ArrayList<String>(expectedCount)
+
+        while (imageUrls.size < expectedCount) {
+            if (!seenHandles.add(handle.token)) throw IOException("Repeated reader page handle")
+            if (handle.pageNumber != imageUrls.size + 1 || handle.pageCount != expectedCount) {
+                throw IOException("Invalid reader page handle")
+            }
+
+            val url = "$apiUrl/reader/p".toHttpUrl().newBuilder()
+                .addPathSegment(handle.token)
+                .build()
+            val page = client.get(url).parseJson<ReaderProtectedPageDto>()
+            if (
+                !page.directImage ||
+                page.pageNumber != imageUrls.size + 1 ||
+                page.pageCount != expectedCount
+            ) {
+                throw IOException("Invalid protected reader page")
+            }
+            imageUrls += page.imageUrl
+            handle = page.nextHandle ?: break
+        }
+
+        val pageList = imageUrls.toPageList(mangaId, chapterNumber)
+        if (expectedCount <= 0 || imageUrls.size != expectedCount || pageList.size != expectedCount) {
+            throw IOException("Incomplete chapter page list")
+        }
+        return pageList
     }
 
     // ============================== Filters =======================================
@@ -327,6 +391,7 @@ abstract class MangaLivre :
             "Resposta não-JSON (Cloudflare ou header desatualizado). Abra a fonte na WebView do app e tente de novo."
         private const val READER_VERIFICATION_REQUIRED = "Reader verification required"
         private const val INTERACTIVE_VERIFICATION_IN_PROGRESS = "Interactive verification already in progress"
+        private const val READER_GRANT_COOKIE = "__Secure-tl_anon_grant"
 
         private const val SORT_POPULAR = "popular"
         private const val SORT_RELEASE = "release"

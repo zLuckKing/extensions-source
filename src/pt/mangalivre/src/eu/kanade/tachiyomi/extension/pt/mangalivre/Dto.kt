@@ -91,12 +91,30 @@ class ChapterReferenceDto(
 class ReaderAccessResponseDto(
     val chapter: ReaderChapterDto,
     val protectedPages: Boolean = false,
+    val pageCount: Int = 0,
+    val firstHandle: ReaderPageHandleDto? = null,
 )
 
 @Serializable
 class ReaderChapterDto(
     val pageCount: Int,
     val pages: List<String> = emptyList(),
+)
+
+@Serializable
+class ReaderPageHandleDto(
+    val token: String,
+    val pageNumber: Int,
+    val pageCount: Int,
+)
+
+@Serializable
+class ReaderProtectedPageDto(
+    val imageUrl: String,
+    val pageNumber: Int,
+    val pageCount: Int,
+    val nextHandle: ReaderPageHandleDto? = null,
+    val directImage: Boolean = false,
 )
 
 @Serializable
